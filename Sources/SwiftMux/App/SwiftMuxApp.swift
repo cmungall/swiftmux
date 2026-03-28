@@ -10,5 +10,8 @@ struct SwiftMuxApp: App {
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unifiedCompact)
+        .commands {
+            AppCommands()
+        }
     }
 }

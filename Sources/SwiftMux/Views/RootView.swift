@@ -3,6 +3,7 @@ import SwiftUI
 struct RootView: View {
     @StateObject private var sessionManager = SessionManager()
     @StateObject private var terminalState = TmuxTerminalState()
+    @State private var commandPalettePresented = false
 
     var body: some View {
         NavigationView {
@@ -24,11 +25,25 @@ struct RootView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
 
+                Button {
+                    commandPalettePresented = true
+                } label: {
+                    Label("Command Palette", systemImage: "magnifyingglass")
+                }
+
                 Toggle(isOn: $sessionManager.groupByRepo) {
                     Label("Group by Repo", systemImage: sessionManager.groupByRepo ? "square.grid.2x2.fill" : "list.bullet")
                 }
                 .toggleStyle(.button)
             }
+        }
+        .sheet(isPresented: $commandPalettePresented) {
+            CommandPaletteView(sessions: sessionManager.sessions) { session in
+                sessionManager.selectedSessionID = session.id
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxOpenCommandPalette)) { _ in
+            commandPalettePresented = true
         }
         .task {
             sessionManager.startPolling()
