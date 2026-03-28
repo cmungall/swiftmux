@@ -2,11 +2,16 @@ import SwiftUI
 
 struct RootView: View {
     @StateObject private var sessionManager = SessionManager()
+    @StateObject private var terminalState = TmuxTerminalState()
 
     var body: some View {
         NavigationView {
             SessionSidebarView(sessionManager: sessionManager)
-            SessionDetailPlaceholderView(session: sessionManager.selectedSession, lastRefresh: sessionManager.lastRefresh)
+            SessionDetailView(
+                session: sessionManager.selectedSession,
+                lastRefresh: sessionManager.lastRefresh,
+                terminalState: terminalState
+            )
         }
         .background(AppTheme.windowBackground)
         .toolbar {
@@ -110,9 +115,10 @@ private struct SessionRowView: View {
     }
 }
 
-private struct SessionDetailPlaceholderView: View {
+private struct SessionDetailView: View {
     let session: SessionInfo?
     let lastRefresh: Date?
+    @ObservedObject var terminalState: TmuxTerminalState
 
     var body: some View {
         ZStack {
@@ -139,13 +145,18 @@ private struct SessionDetailPlaceholderView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Working Directory")
+                        Text("Session Metadata")
                             .font(.system(size: 12, weight: .semibold, design: .monospaced))
                             .foregroundColor(AppTheme.mutedText)
 
-                        Text(session.shortenedWorkingDirectory)
-                            .font(.system(size: 13, weight: .regular, design: .monospaced))
-                            .textSelection(.enabled)
+                        VStack(alignment: .leading, spacing: 10) {
+                            MetadataLine(label: "Status", value: terminalState.statusMessage)
+                            MetadataLine(label: "Directory", value: terminalState.currentDirectory ?? session.shortenedWorkingDirectory)
+                            MetadataLine(label: "Title", value: terminalState.terminalTitle)
+                            if let branch = session.branchName {
+                                MetadataLine(label: "Branch", value: branch)
+                            }
+                        }
                     }
                     .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -161,8 +172,25 @@ private struct SessionDetailPlaceholderView: View {
                             .font(.system(size: 12, weight: .semibold, design: .monospaced))
                             .foregroundColor(AppTheme.mutedText)
 
-                        Text("SwiftTerm attaches here in the next slice. Selection and tmux metadata are already wired.")
-                            .foregroundColor(AppTheme.mutedText)
+                        if let error = terminalState.lastError {
+                            HStack {
+                                Text(error)
+                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .foregroundColor(.red.opacity(0.9))
+
+                                Spacer(minLength: 12)
+
+                                Button("Reconnect") {
+                                    terminalState.requestReconnect(for: session.name)
+                                }
+                            }
+                            .padding(.bottom, 4)
+                        }
+
+                        TmuxTerminalView(session: session, terminalState: terminalState)
+                            .id(terminalState.resetToken)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(AppTheme.panelBackground)
                     }
                     .padding(20)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -200,5 +228,23 @@ private struct MetadataChip: View {
             .padding(.vertical, 6)
             .background(tint.opacity(0.85))
             .clipShape(Capsule())
+    }
+}
+
+private struct MetadataLine: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label.uppercased())
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundColor(AppTheme.mutedText)
+                .frame(width: 76, alignment: .leading)
+
+            Text(value)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .textSelection(.enabled)
+        }
     }
 }
