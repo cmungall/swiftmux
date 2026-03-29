@@ -65,7 +65,7 @@ enum SessionStatus: String, Codable, CaseIterable, Hashable {
 
 struct SessionInfo: Identifiable, Codable, Hashable {
     struct Metadata: Codable, Hashable {
-        let repo: String?
+        var repo: String?
         let task: String?
         let branch: String?
         let desc: String?
@@ -75,7 +75,7 @@ struct SessionInfo: Identifiable, Codable, Hashable {
     let name: String
     let process: String
     let workingDirectory: String
-    let metadata: Metadata
+    var metadata: Metadata
 
     enum CodingKeys: String, CodingKey {
         case name
@@ -88,6 +88,20 @@ struct SessionInfo: Identifiable, Codable, Hashable {
 
     var repoName: String {
         guard let candidate = metadata.repo?.nonEmpty else {
+            // No @repo metadata — infer from working directory.
+            // For worktrees (~/worktrees/*), resolve the parent repo name
+            // by checking if the path contains "/worktrees/".
+            let dir = workingDirectory
+                .replacingOccurrences(of: "~", with: NSHomeDirectory())
+
+            if dir.contains("/worktrees/") {
+                // Worktree dir names are like "dismech-prev-1" or "agr-mouse-frmpd2".
+                // The repo name is the prefix before the first dash-separated task portion.
+                // Better: check if a git remote origin exists, but that's expensive.
+                // Heuristic: use the session name prefix before the first hyphen,
+                // or fall back to last path component.
+            }
+
             return URL(fileURLWithPath: workingDirectory).lastPathComponent.nonEmpty ?? "Ungrouped"
         }
 
@@ -99,7 +113,21 @@ struct SessionInfo: Identifiable, Codable, Hashable {
     }
 
     var repoGroupName: String {
-        repoName.nonEmpty ?? "Ungrouped"
+        if let repo = repoName.nonEmpty {
+            return repo
+        }
+
+        let dir = workingDirectory
+            .replacingOccurrences(of: "~", with: NSHomeDirectory())
+        let url = URL(fileURLWithPath: dir)
+
+        // ~/repos/<repo-name> → use repo-name
+        if url.deletingLastPathComponent().lastPathComponent == "repos" {
+            return url.lastPathComponent
+        }
+
+        // For worktrees and everything else, fall back to last path component
+        return url.lastPathComponent.nonEmpty ?? "Ungrouped"
     }
 
     var status: SessionStatus {
