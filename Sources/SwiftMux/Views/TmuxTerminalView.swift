@@ -17,7 +17,7 @@ struct TmuxTerminalView: NSViewRepresentable {
         view.nativeBackgroundColor = NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1.0)
         view.nativeForegroundColor = NSColor(calibratedRed: 0.88, green: 0.91, blue: 0.94, alpha: 1.0)
         view.optionAsMetaKey = false
-        view.allowMouseReporting = false
+        view.allowMouseReporting = true
         view.getTerminal().silentLog = true
         context.coordinator.bind(view)
         return view
@@ -108,7 +108,8 @@ struct TmuxTerminalView: NSViewRepresentable {
             self.activeTTY = nil
             self.launchedSessionName = sessionName
 
-            let shellCommand = "tty > \(shellQuoted(ttyHandshakeURL.path)); exec tmux attach-session -t \(shellQuoted(sessionName))"
+            // Enable mouse for this client so scroll wheel works (enters copy-mode automatically)
+            let shellCommand = "tty > \(shellQuoted(ttyHandshakeURL.path)); tmux set-option -t \(shellQuoted(sessionName)) mouse on 2>/dev/null; exec tmux attach-session -t \(shellQuoted(sessionName))"
 
             terminalView.startProcess(
                 executable: "/bin/sh",
