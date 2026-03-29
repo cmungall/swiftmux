@@ -82,14 +82,14 @@ private struct SessionSidebarView: View {
                 switch tab {
                 case .recent:
                     ForEach(sessionManager.sessionsByRecency) { session in
-                        SessionRowView(session: session)
+                        SessionRowView(session: session, onKill: { sessionManager.killSession($0) })
                             .tag(session.id)
                     }
                 case .repo:
                     ForEach(sessionManager.sessionGroups) { group in
                         Section(group.name) {
                             ForEach(group.sessions) { session in
-                                SessionRowView(session: session)
+                                SessionRowView(session: session, onKill: { sessionManager.killSession($0) })
                                     .tag(session.id)
                             }
                         }
@@ -106,6 +106,8 @@ private struct SessionSidebarView: View {
 
 private struct SessionRowView: View {
     let session: SessionInfo
+    var onKill: ((SessionInfo) -> Void)?
+    @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -119,6 +121,18 @@ private struct SessionRowView: View {
                     .lineLimit(1)
 
                 Spacer(minLength: 8)
+
+                if hovering {
+                    Button {
+                        onKill?(session)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(AppTheme.mutedText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Kill session")
+                }
 
                 Text(session.process)
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -142,6 +156,7 @@ private struct SessionRowView: View {
             .foregroundColor(AppTheme.mutedText)
         }
         .padding(.vertical, 6)
+        .onHover { hovering = $0 }
     }
 }
 

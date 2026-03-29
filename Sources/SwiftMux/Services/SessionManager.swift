@@ -74,6 +74,20 @@ final class SessionManager: ObservableObject {
         pollingTask = nil
     }
 
+    func killSession(_ session: SessionInfo) {
+        Task.detached {
+            _ = try? CommandRunner.run(
+                executable: "/usr/bin/env",
+                arguments: ["tp", "kill", session.name]
+            )
+        }
+        // Remove from list immediately for snappy UI
+        sessions.removeAll { $0.id == session.id }
+        if selectedSessionID == session.id {
+            selectedSessionID = sessions.first?.id
+        }
+    }
+
     func refresh() async {
         do {
             let sessions = try await Task.detached(priority: .userInitiated) {
