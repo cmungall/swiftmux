@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct RootView: View {
@@ -68,9 +69,34 @@ private func fuzzyMatch(query: String, in text: String) -> Bool {
 }
 
 private struct SessionSidebarView: View {
+    private enum FocusTarget: Hashable {
+        case search
+        case list
+    }
+
     @ObservedObject var sessionManager: SessionManager
     @State private var tab: SidebarTab = .recent
     @State private var searchText = ""
+    @FocusState private var focusTarget: FocusTarget?
+
+    private var visibleRecentSessions: [SessionInfo] {
+        sessionManager.sessionsByRecency.filter(matches)
+    }
+
+    private var visibleRepoSessions: [SessionInfo] {
+        sessionManager.sessionGroups.flatMap { group in
+            group.sessions.filter(matches)
+        }
+    }
+
+    private var visibleSessions: [SessionInfo] {
+        switch tab {
+        case .recent:
+            return visibleRecentSessions
+        case .repo:
+            return visibleRepoSessions
+        }
+    }
 
     private func matches(_ session: SessionInfo) -> Bool {
         guard !searchText.isEmpty else { return true }
@@ -95,6 +121,7 @@ private struct SessionSidebarView: View {
                 TextField("Filter…", text: $searchText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
+                    .focused($focusTarget, equals: .search)
                 if !searchText.isEmpty {
                     Button {
                         searchText = ""
@@ -132,36 +159,110 @@ private struct SessionSidebarView: View {
 
                 switch tab {
                 case .recent:
-                    ForEach(sessionManager.sessionsByRecency.filter(matches)) { session in
-                        SessionRowView(session: session, onKill: { sessionManager.killSession($0) })
+                    ForEach(visibleRecentSessions) { session in
+                        SessionRowView(
+                            session: session,
+                            onKill: { sessionManager.killSession($0) },
+                            onPeek: { session in
+                                try await sessionManager.peekOutput(for: session)
+                            }
+                        )
                             .tag(session.id)
                     }
                 case .repo:
                     ForEach(sessionManager.sessionGroups) { group in
                         let filtered = group.sessions.filter(matches)
                         if !filtered.isEmpty {
-                            Section(group.name) {
+                            Section {
                                 ForEach(filtered) { session in
-                                    SessionRowView(session: session, onKill: { sessionManager.killSession($0) })
+                                    SessionRowView(
+                                        session: session,
+                                        onKill: { sessionManager.killSession($0) },
+                                        onPeek: { session in
+                                            try await sessionManager.peekOutput(for: session)
+                                        }
+                                    )
                                         .tag(session.id)
                                 }
+                            } header: {
+                                SessionRepoGroupHeader(name: group.name, count: filtered.count)
                             }
                         }
                     }
                 }
+            }
+            .focusable()
+            .focused($focusTarget, equals: .list)
+            .onMoveCommand { direction in
+                guard focusTarget == .list else {
+                    return
+                }
+
+                switch direction {
+                case .down:
+                    moveSelection(by: 1)
+                case .up:
+                    moveSelection(by: -1)
+                default:
+                    break
+                }
+            }
+            .onTapGesture {
+                focusTarget = .list
             }
             .listStyle(.sidebar)
             .background(AppTheme.sidebarBackground)
         }
         .background(AppTheme.sidebarBackground)
         .navigationTitle("SwiftMux")
+        .onAppear {
+            focusTarget = .list
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxSelectSidebarSessionIndex)) { notification in
+            guard let index = notification.userInfo?["index"] as? Int else {
+                return
+            }
+
+            selectVisibleSession(at: index)
+            focusTarget = .list
+        }
+    }
+
+    private func moveSelection(by offset: Int) {
+        guard !visibleSessions.isEmpty else {
+            return
+        }
+
+        let nextIndex: Int
+        if let selectedSessionID = sessionManager.selectedSessionID,
+           let currentIndex = visibleSessions.firstIndex(where: { $0.id == selectedSessionID }) {
+            nextIndex = min(max(currentIndex + offset, 0), visibleSessions.count - 1)
+        } else {
+            nextIndex = offset >= 0 ? 0 : visibleSessions.count - 1
+        }
+
+        sessionManager.selectedSessionID = visibleSessions[nextIndex].id
+    }
+
+    private func selectVisibleSession(at index: Int) {
+        guard visibleSessions.indices.contains(index) else {
+            return
+        }
+
+        sessionManager.selectedSessionID = visibleSessions[index].id
     }
 }
 
 private struct SessionRowView: View {
     let session: SessionInfo
     var onKill: ((SessionInfo) -> Void)?
+    var onPeek: ((SessionInfo) async throws -> String)?
     @State private var hovering = false
+    @State private var peekPresented = false
+    @State private var peekLoading = false
+    @State private var peekOutput = ""
+    @State private var peekError: String?
+    @State private var peekTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -211,6 +312,126 @@ private struct SessionRowView: View {
         }
         .padding(.vertical, 6)
         .onHover { hovering = $0 }
+        .contextMenu {
+            Button("Peek") {
+                presentPeek()
+            }
+
+            Button("Copy Name") {
+                copyNameToPasteboard()
+            }
+
+            Divider()
+
+            Button("Kill") {
+                onKill?(session)
+            }
+        }
+        .popover(isPresented: $peekPresented, arrowEdge: .trailing) {
+            SessionPeekPopoverView(
+                sessionName: session.name,
+                isLoading: peekLoading,
+                output: peekOutput,
+                error: peekError
+            )
+        }
+        .onDisappear {
+            peekTask?.cancel()
+            peekTask = nil
+        }
+    }
+
+    private func presentPeek() {
+        peekPresented = true
+        peekLoading = true
+        peekOutput = ""
+        peekError = nil
+        peekTask?.cancel()
+        peekTask = Task {
+            do {
+                let output = try await onPeek?(session) ?? ""
+                await MainActor.run {
+                    peekOutput = output
+                    peekLoading = false
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    peekLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    peekError = error.localizedDescription
+                    peekLoading = false
+                }
+            }
+        }
+    }
+
+    private func copyNameToPasteboard() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(session.name, forType: .string)
+    }
+}
+
+private struct SessionPeekPopoverView: View {
+    let sessionName: String
+    let isLoading: Bool
+    let output: String
+    let error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Peek: \(sessionName)")
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+
+            if isLoading {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading last 50 lines…")
+                        .foregroundColor(AppTheme.mutedText)
+                }
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+            } else if let error {
+                Text(error)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundColor(.red.opacity(0.9))
+                    .textSelection(.enabled)
+            } else {
+                ScrollView {
+                    Text(output.isEmpty ? "No output returned." : output)
+                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(12)
+                }
+                .background(AppTheme.windowBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+        }
+        .padding(16)
+        .frame(width: 540, height: 340, alignment: .topLeading)
+        .background(AppTheme.panelBackground)
+    }
+}
+
+private struct SessionRepoGroupHeader: View {
+    let name: String
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(name)
+
+            Text("\(count)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundColor(.white.opacity(0.92))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(AppTheme.elevatedBackground)
+                .clipShape(Capsule())
+        }
     }
 }
 

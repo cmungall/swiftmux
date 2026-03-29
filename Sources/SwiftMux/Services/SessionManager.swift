@@ -88,6 +88,16 @@ final class SessionManager: ObservableObject {
         }
     }
 
+    func peekOutput(for session: SessionInfo, lines: Int = 50) async throws -> String {
+        try await Task.detached(priority: .userInitiated) {
+            let output = try CommandRunner.runExpectingSuccess(
+                executable: "/usr/bin/env",
+                arguments: ["tp", "peek", "--lines", String(lines), session.name]
+            )
+            return output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.value
+    }
+
     func refresh() async {
         do {
             let sessions = try await Task.detached(priority: .userInitiated) {

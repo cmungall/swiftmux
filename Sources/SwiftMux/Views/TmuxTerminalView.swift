@@ -42,6 +42,7 @@ struct TmuxTerminalView: NSViewRepresentable {
         private var ttyPollingTask: Task<Void, Never>?
         private var switchTask: Task<Void, Never>?
         private var lastRequestedSessionName: String?
+        private var scrollMonitor: Any?
 
         init(terminalState: TmuxTerminalState) {
             self.terminalState = terminalState
@@ -49,11 +50,16 @@ struct TmuxTerminalView: NSViewRepresentable {
 
         func bind(_ terminalView: LocalProcessTerminalView) {
             self.terminalView = terminalView
+            installScrollMonitorIfNeeded()
         }
 
         func teardown() {
             ttyPollingTask?.cancel()
             switchTask?.cancel()
+            if let scrollMonitor {
+                NSEvent.removeMonitor(scrollMonitor)
+                self.scrollMonitor = nil
+            }
 
             if let ttyHandshakeURL {
                 try? FileManager.default.removeItem(at: ttyHandshakeURL)
@@ -87,6 +93,11 @@ struct TmuxTerminalView: NSViewRepresentable {
                 do {
                     _ = try CommandRunner.runExpectingSuccess(
                         executable: "/usr/bin/env",
+                        arguments: ["tmux", "set-option", "-t", targetSessionName, "mouse", "on"]
+                    )
+
+                    _ = try CommandRunner.runExpectingSuccess(
+                        executable: "/usr/bin/env",
                         arguments: ["tmux", "switch-client", "-c", activeTTY, "-t", targetSessionName]
                     )
 
@@ -108,7 +119,7 @@ struct TmuxTerminalView: NSViewRepresentable {
             self.activeTTY = nil
             self.launchedSessionName = sessionName
 
-            // Enable mouse for this client so scroll wheel works (enters copy-mode automatically)
+            // Enable tmux mouse mode before attaching so wheel events can drive copy-mode scrollback.
             let shellCommand = "tty > \(shellQuoted(ttyHandshakeURL.path)); tmux set-option -t \(shellQuoted(sessionName)) mouse on 2>/dev/null; exec tmux attach-session -t \(shellQuoted(sessionName))"
 
             terminalView.startProcess(
@@ -190,6 +201,87 @@ struct TmuxTerminalView: NSViewRepresentable {
 
         private func shellQuoted(_ value: String) -> String {
             "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        }
+
+        private func installScrollMonitorIfNeeded() {
+            guard scrollMonitor == nil else {
+                return
+            }
+
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, self.handleScrollWheel(event) else {
+                    return event
+                }
+
+                return nil
+            }
+        }
+
+        private func handleScrollWheel(_ event: NSEvent) -> Bool {
+            guard let terminalView else {
+                return false
+            }
+
+            let terminal = terminalView.getTerminal()
+            guard terminalView.allowMouseReporting, terminal.mouseMode != .off else {
+                return false
+            }
+
+            guard event.window === terminalView.window else {
+                return false
+            }
+
+            let point = terminalView.convert(event.locationInWindow, from: nil)
+            guard terminalView.bounds.contains(point) else {
+                return false
+            }
+
+            let deltaY = event.scrollingDeltaY == 0 ? event.deltaY : event.scrollingDeltaY
+            guard deltaY != 0 else {
+                return false
+            }
+
+            let hit = mouseHit(for: point, in: terminalView, terminal: terminal)
+            let modifiers = event.modifierFlags
+            let buttonFlags = terminal.encodeButton(
+                button: deltaY > 0 ? 4 : 5,
+                release: false,
+                shift: modifiers.contains(.shift),
+                meta: modifiers.contains(.option),
+                control: modifiers.contains(.control)
+            )
+
+            terminal.sendEvent(
+                buttonFlags: buttonFlags,
+                x: hit.grid.col,
+                y: hit.grid.row,
+                pixelX: hit.pixel.col,
+                pixelY: hit.pixel.row
+            )
+            return true
+        }
+
+        private func mouseHit(
+            for point: CGPoint,
+            in terminalView: LocalProcessTerminalView,
+            terminal: Terminal
+        ) -> (grid: Position, pixel: Position) {
+            let clampedX = min(max(point.x, 0), terminalView.bounds.width)
+            let clampedY = min(max(point.y, 0), terminalView.bounds.height)
+            let cols = max(terminal.cols, 1)
+            let rows = max(terminal.rows, 1)
+            let cellWidth = max(terminalView.bounds.width / CGFloat(cols), 1)
+            let cellHeight = max(terminalView.bounds.height / CGFloat(rows), 1)
+
+            let gridCol = min(max(Int(clampedX / cellWidth), 0), cols - 1)
+            let gridRow = min(max(Int((terminalView.bounds.height - clampedY) / cellHeight), 0), rows - 1)
+            let pixelCol = Int(clampedX)
+            let pixelRow = Int(terminalView.bounds.height - clampedY)
+
+            return (
+                grid: Position(col: gridCol, row: gridRow),
+                pixel: Position(col: pixelCol, row: pixelRow)
+            )
         }
 
         nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}

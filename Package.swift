@@ -25,7 +25,10 @@ let package = Package(
             dependencies: [
                 "SwiftTerm"
             ],
-            path: "Sources/SwiftMux"
+            path: "Sources/SwiftMux",
+            exclude: [
+                "Resources"
+            ]
         )
     ]
 )
