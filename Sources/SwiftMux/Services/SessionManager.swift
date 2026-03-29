@@ -18,6 +18,18 @@ final class SessionManager: ObservableObject {
         sessions.first(where: { $0.id == selectedSessionID })
     }
 
+    /// Sessions ordered by recency: active first, then by status rank.
+    var sessionsByRecency: [SessionInfo] {
+        sessions.sorted { lhs, rhs in
+            // Active/running always first
+            if lhs.status != rhs.status {
+                return lhs.status.rank < rhs.status.rank
+            }
+            // Within same status, alphabetical by name
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
     var sessionGroups: [SessionRepoGroup] {
         let grouped = Dictionary(grouping: sessions, by: \.repoGroupName)
         let names = grouped.keys.sorted { lhs, rhs in

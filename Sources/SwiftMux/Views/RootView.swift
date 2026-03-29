@@ -31,10 +31,7 @@ struct RootView: View {
                     Label("Command Palette", systemImage: "magnifyingglass")
                 }
 
-                Toggle(isOn: $sessionManager.groupByRepo) {
-                    Label("Group by Repo", systemImage: sessionManager.groupByRepo ? "square.grid.2x2.fill" : "list.bullet")
-                }
-                .toggleStyle(.button)
+
             }
         }
         .sheet(isPresented: $commandPalettePresented) {
@@ -51,39 +48,57 @@ struct RootView: View {
     }
 }
 
+private enum SidebarTab: String, CaseIterable {
+    case recent = "Recent"
+    case repo = "By Repo"
+}
+
 private struct SessionSidebarView: View {
     @ObservedObject var sessionManager: SessionManager
+    @State private var tab: SidebarTab = .recent
 
     var body: some View {
-        List(selection: $sessionManager.selectedSessionID) {
-            if let pollError = sessionManager.pollError {
-                Section {
-                    Text(pollError)
-                        .font(.caption)
-                        .foregroundColor(.red)
-                        .textSelection(.enabled)
+        VStack(spacing: 0) {
+            // Compact tab picker — stays within sidebar width
+            Picker("View", selection: $tab) {
+                ForEach(SidebarTab.allCases, id: \.self) { t in
+                    Text(t.rawValue).tag(t)
                 }
             }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
 
-            if sessionManager.groupByRepo {
-                ForEach(sessionManager.sessionGroups) { group in
-                    Section(group.name) {
-                        ForEach(group.sessions) { session in
-                            SessionRowView(session: session)
-                                .tag(session.id)
-                        }
+            List(selection: $sessionManager.selectedSessionID) {
+                if let pollError = sessionManager.pollError {
+                    Section {
+                        Text(pollError)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                            .textSelection(.enabled)
                     }
                 }
-            } else {
-                Section("All Sessions") {
-                    ForEach(sessionManager.sessions) { session in
+
+                switch tab {
+                case .recent:
+                    ForEach(sessionManager.sessionsByRecency) { session in
                         SessionRowView(session: session)
                             .tag(session.id)
                     }
+                case .repo:
+                    ForEach(sessionManager.sessionGroups) { group in
+                        Section(group.name) {
+                            ForEach(group.sessions) { session in
+                                SessionRowView(session: session)
+                                    .tag(session.id)
+                            }
+                        }
+                    }
                 }
             }
+            .listStyle(.sidebar)
+            .background(AppTheme.sidebarBackground)
         }
-        .listStyle(.sidebar)
         .background(AppTheme.sidebarBackground)
         .navigationTitle("SwiftMux")
     }
