@@ -53,13 +53,64 @@ private enum SidebarTab: String, CaseIterable {
     case repo = "By Repo"
 }
 
+/// Fuzzy match à la fzf: characters must appear in order but not contiguously.
+private func fuzzyMatch(query: String, in text: String) -> Bool {
+    guard !query.isEmpty else { return true }
+    var qi = query.lowercased().makeIterator()
+    var need = qi.next()
+    for ch in text.lowercased() {
+        if ch == need {
+            need = qi.next()
+            if need == nil { return true }
+        }
+    }
+    return false
+}
+
 private struct SessionSidebarView: View {
     @ObservedObject var sessionManager: SessionManager
     @State private var tab: SidebarTab = .recent
+    @State private var searchText = ""
+
+    private func matches(_ session: SessionInfo) -> Bool {
+        guard !searchText.isEmpty else { return true }
+        // Match against name, desc, repo, branch — same fields fzf sees in tp
+        let haystack = [
+            session.name,
+            session.metadata.desc ?? "",
+            session.repoGroupName,
+            session.branchName ?? "",
+            session.process,
+        ].joined(separator: " ")
+        return fuzzyMatch(query: searchText, in: haystack)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Compact tab picker — stays within sidebar width
+            // Search bar — compact, always visible
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundColor(AppTheme.mutedText)
+                TextField("Filter…", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(AppTheme.mutedText)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(AppTheme.panelBackground)
+
+            // Tab picker
             Picker("View", selection: $tab) {
                 ForEach(SidebarTab.allCases, id: \.self) { t in
                     Text(t.rawValue).tag(t)
@@ -67,7 +118,7 @@ private struct SessionSidebarView: View {
             }
             .pickerStyle(.segmented)
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
 
             List(selection: $sessionManager.selectedSessionID) {
                 if let pollError = sessionManager.pollError {
@@ -81,16 +132,19 @@ private struct SessionSidebarView: View {
 
                 switch tab {
                 case .recent:
-                    ForEach(sessionManager.sessionsByRecency) { session in
+                    ForEach(sessionManager.sessionsByRecency.filter(matches)) { session in
                         SessionRowView(session: session, onKill: { sessionManager.killSession($0) })
                             .tag(session.id)
                     }
                 case .repo:
                     ForEach(sessionManager.sessionGroups) { group in
-                        Section(group.name) {
-                            ForEach(group.sessions) { session in
-                                SessionRowView(session: session, onKill: { sessionManager.killSession($0) })
-                                    .tag(session.id)
+                        let filtered = group.sessions.filter(matches)
+                        if !filtered.isEmpty {
+                            Section(group.name) {
+                                ForEach(filtered) { session in
+                                    SessionRowView(session: session, onKill: { sessionManager.killSession($0) })
+                                        .tag(session.id)
+                                }
                             }
                         }
                     }
