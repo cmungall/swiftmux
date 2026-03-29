@@ -156,88 +156,52 @@ private struct SessionDetailView: View {
                 .ignoresSafeArea()
 
             if let session {
-                VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 8) {
+                    // Compact header: name + chips on one line
+                    HStack(alignment: .center, spacing: 12) {
                         Text(session.name)
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
 
-                        Text(session.descriptionText ?? "tmux session")
+                        MetadataChip(text: session.status.label, tint: session.status.color)
+                        MetadataChip(text: session.process)
+                        if let branch = session.branchName {
+                            MetadataChip(text: branch)
+                        }
+
+                        Spacer()
+
+                        // Inline metadata
+                        Text(terminalState.currentDirectory ?? session.shortenedWorkingDirectory)
+                            .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(AppTheme.mutedText)
+                            .lineLimit(1)
+                    }
 
-                        HStack(spacing: 12) {
-                            MetadataChip(text: session.repoGroupName)
-                            MetadataChip(text: session.status.label, tint: session.status.color)
-                            if let branch = session.branchName {
-                                MetadataChip(text: branch)
+                    if let error = terminalState.lastError {
+                        HStack {
+                            Text(error)
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
+                                .foregroundColor(.red.opacity(0.9))
+
+                            Spacer(minLength: 12)
+
+                            Button("Reconnect") {
+                                terminalState.requestReconnect(for: session.name)
                             }
-                            MetadataChip(text: session.process)
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Session Metadata")
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundColor(AppTheme.mutedText)
-
-                        VStack(alignment: .leading, spacing: 10) {
-                            MetadataLine(label: "Status", value: terminalState.statusMessage)
-                            MetadataLine(label: "Directory", value: terminalState.currentDirectory ?? session.shortenedWorkingDirectory)
-                            MetadataLine(label: "Title", value: terminalState.terminalTitle)
-                            if let branch = session.branchName {
-                                MetadataLine(label: "Branch", value: branch)
-                            }
-                        }
-                    }
-                    .padding(20)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(AppTheme.panelBackground)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14)
-                            .stroke(AppTheme.border, lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Terminal")
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundColor(AppTheme.mutedText)
-
-                        if let error = terminalState.lastError {
-                            HStack {
-                                Text(error)
-                                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                                    .foregroundColor(.red.opacity(0.9))
-
-                                Spacer(minLength: 12)
-
-                                Button("Reconnect") {
-                                    terminalState.requestReconnect(for: session.name)
-                                }
-                            }
-                            .padding(.bottom, 4)
-                        }
-
-                        TmuxTerminalView(session: session, terminalState: terminalState)
-                            .id(terminalState.resetToken)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(AppTheme.panelBackground)
-                    }
-                    .padding(20)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .background(AppTheme.panelBackground)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18)
-                            .stroke(AppTheme.border, lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-
-                    if let lastRefresh {
-                        Text("Last refresh \(lastRefresh.formatted(date: .omitted, time: .standard))")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(AppTheme.mutedText)
-                    }
+                    TmuxTerminalView(session: session, terminalState: terminalState)
+                        .id(terminalState.resetToken)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(AppTheme.panelBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(AppTheme.border, lineWidth: 1)
+                        )
                 }
-                .padding(28)
+                .padding(12)
             } else {
                 Text("No tmux sessions found.")
                     .foregroundColor(AppTheme.mutedText)
