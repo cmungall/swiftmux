@@ -5,14 +5,21 @@ struct RootView: View {
     @StateObject private var sessionManager = SessionManager()
     @StateObject private var terminalState = TmuxTerminalState()
     @State private var commandPalettePresented = false
+    @State private var helpPresented = false
+    @State private var helpTopic: SwiftMuxHelpTopic = .overview
 
     var body: some View {
         NavigationView {
-            SessionSidebarView(sessionManager: sessionManager)
+            SessionSidebarView(
+                sessionManager: sessionManager,
+                onOpenHelp: { presentHelp() }
+            )
             SessionDetailView(
                 session: sessionManager.selectedSession,
                 lastRefresh: sessionManager.lastRefresh,
-                terminalState: terminalState
+                terminalState: terminalState,
+                onOpenHelp: { presentHelp(topic: .sessions) },
+                onRefresh: refreshSessions
             )
         }
         .background(AppTheme.windowBackground)
@@ -25,14 +32,14 @@ struct RootView: View {
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .help("Reload tmux sessions from tmux-pilot")
 
                 Button {
                     commandPalettePresented = true
                 } label: {
                     Label("Command Palette", systemImage: "magnifyingglass")
                 }
-
-
+                .help("Jump to a tmux session with fuzzy search")
             }
         }
         .sheet(isPresented: $commandPalettePresented) {
@@ -40,11 +47,42 @@ struct RootView: View {
                 sessionManager.selectedSessionID = session.id
             }
         }
+        .sheet(isPresented: $helpPresented) {
+            SwiftMuxHelpSheet(
+                selectedTopic: $helpTopic,
+                onOpenPalette: { commandPalettePresented = true },
+                onFocusSidebarSearch: focusSidebarSearch,
+                onRefresh: refreshSessions
+            )
+        }
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxOpenCommandPalette)) { _ in
             commandPalettePresented = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxShowHelp)) { notification in
+            let topic = (notification.userInfo?["topic"] as? String)
+                .flatMap(SwiftMuxHelpTopic.init(rawValue:))
+            presentHelp(topic: topic ?? .overview)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxRefreshSessions)) { _ in
+            refreshSessions()
+        }
         .task {
             sessionManager.startPolling()
+        }
+    }
+
+    private func presentHelp(topic: SwiftMuxHelpTopic = .overview) {
+        helpTopic = topic
+        helpPresented = true
+    }
+
+    private func focusSidebarSearch() {
+        NotificationCenter.default.post(name: .swiftMuxFocusSidebarSearch, object: nil)
+    }
+
+    private func refreshSessions() {
+        Task {
+            await sessionManager.refresh()
         }
     }
 }
@@ -75,6 +113,7 @@ private struct SessionSidebarView: View {
     }
 
     @ObservedObject var sessionManager: SessionManager
+    let onOpenHelp: () -> Void
     @State private var tab: SidebarTab = .recent
     @State private var searchText = ""
     @FocusState private var focusTarget: FocusTarget?
@@ -136,6 +175,7 @@ private struct SessionSidebarView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(AppTheme.panelBackground)
+            .help("Filter by session name, repo, branch, process, or description")
 
             // Tab picker
             Picker("View", selection: $tab) {
@@ -146,6 +186,10 @@ private struct SessionSidebarView: View {
             .pickerStyle(.segmented)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
+
+            SidebarGuidanceCard(onOpenHelp: onOpenHelp)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
 
             List(selection: $sessionManager.selectedSessionID) {
                 if let pollError = sessionManager.pollError {
@@ -212,11 +256,15 @@ private struct SessionSidebarView: View {
             }
             .listStyle(.sidebar)
             .background(AppTheme.sidebarBackground)
+            .help("Select a session to attach. Right-click rows for Peek, Copy Name, or Kill.")
         }
         .background(AppTheme.sidebarBackground)
         .navigationTitle("SwiftMux")
         .onAppear {
             focusTarget = .list
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxFocusSidebarSearch)) { _ in
+            focusTarget = .search
         }
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxSelectSidebarSessionIndex)) { notification in
             guard let index = notification.userInfo?["index"] as? Int else {
@@ -439,6 +487,8 @@ private struct SessionDetailView: View {
     let session: SessionInfo?
     let lastRefresh: Date?
     @ObservedObject var terminalState: TmuxTerminalState
+    let onOpenHelp: () -> Void
+    let onRefresh: () -> Void
 
     var body: some View {
         ZStack {
@@ -467,6 +517,12 @@ private struct SessionDetailView: View {
                             .lineLimit(1)
                     }
 
+                    SessionGuidanceCard(
+                        statusMessage: terminalState.statusMessage,
+                        lastRefresh: lastRefresh,
+                        onOpenHelp: onOpenHelp
+                    )
+
                     if let error = terminalState.lastError {
                         HStack {
                             Text(error)
@@ -485,6 +541,7 @@ private struct SessionDetailView: View {
                         .id(terminalState.resetToken)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(AppTheme.panelBackground)
+                        .help("Attached tmux client. Scroll wheel input is forwarded to tmux mouse mode.")
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
@@ -493,8 +550,41 @@ private struct SessionDetailView: View {
                 }
                 .padding(12)
             } else {
-                Text("No tmux sessions found.")
-                    .foregroundColor(AppTheme.mutedText)
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("No tmux sessions found")
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+
+                    Text("SwiftMux reads sessions from `tp ls --json`. Start tmux work, then refresh to populate the sidebar.")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundColor(AppTheme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("1. Make sure tmux is running.")
+                        Text("2. Install `tmux-pilot` so `tp` is available.")
+                        Text("3. Use Cmd-R to refresh once sessions exist.")
+                    }
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundColor(.white.opacity(0.92))
+
+                    HStack(spacing: 10) {
+                        Button("Refresh") {
+                            onRefresh()
+                        }
+
+                        Button("Open Help") {
+                            onOpenHelp()
+                        }
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: 520, alignment: .leading)
+                .background(AppTheme.panelBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(AppTheme.border, lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 14))
             }
         }
     }
