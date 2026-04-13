@@ -14,6 +14,7 @@ app: build
     mkdir -p SwiftMux.app/Contents/MacOS
     mkdir -p SwiftMux.app/Contents/Resources
     cp .build/debug/SwiftMux SwiftMux.app/Contents/MacOS/
+    cp Sources/SwiftMux/Resources/SwiftMux.icns SwiftMux.app/Contents/Resources/
     xcrun actool Sources/SwiftMux/Resources/Assets.xcassets \
         --compile SwiftMux.app/Contents/Resources \
         --platform macosx \

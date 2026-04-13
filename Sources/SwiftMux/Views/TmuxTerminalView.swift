@@ -43,6 +43,8 @@ struct TmuxTerminalView: NSViewRepresentable {
         private var switchTask: Task<Void, Never>?
         private var lastRequestedSessionName: String?
         private var scrollMonitor: Any?
+        private var preciseScrollAccumulator: CGFloat = 0
+        private var lastPreciseScrollDirection = 0
 
         init(terminalState: TmuxTerminalState) {
             self.terminalState = terminalState
@@ -56,6 +58,7 @@ struct TmuxTerminalView: NSViewRepresentable {
         func teardown() {
             ttyPollingTask?.cancel()
             switchTask?.cancel()
+            resetPreciseScrollState()
             if let scrollMonitor {
                 NSEvent.removeMonitor(scrollMonitor)
                 self.scrollMonitor = nil
@@ -93,11 +96,6 @@ struct TmuxTerminalView: NSViewRepresentable {
                 do {
                     _ = try CommandRunner.runExpectingSuccess(
                         executable: "/usr/bin/env",
-                        arguments: ["tmux", "set-option", "-t", targetSessionName, "mouse", "on"]
-                    )
-
-                    _ = try CommandRunner.runExpectingSuccess(
-                        executable: "/usr/bin/env",
                         arguments: ["tmux", "switch-client", "-c", activeTTY, "-t", targetSessionName]
                     )
 
@@ -119,8 +117,8 @@ struct TmuxTerminalView: NSViewRepresentable {
             self.activeTTY = nil
             self.launchedSessionName = sessionName
 
-            // Enable tmux mouse mode before attaching so wheel events can drive copy-mode scrollback.
-            let shellCommand = "tty > \(shellQuoted(ttyHandshakeURL.path)); tmux set-option -t \(shellQuoted(sessionName)) mouse on 2>/dev/null; exec tmux attach-session -t \(shellQuoted(sessionName))"
+            // Respect the session's existing tmux mouse configuration so native text selection keeps working.
+            let shellCommand = "tty > \(shellQuoted(ttyHandshakeURL.path)); exec tmux attach-session -t \(shellQuoted(sessionName))"
 
             terminalView.startProcess(
                 executable: "/bin/sh",
@@ -236,29 +234,84 @@ struct TmuxTerminalView: NSViewRepresentable {
                 return false
             }
 
-            let deltaY = event.scrollingDeltaY == 0 ? event.deltaY : event.scrollingDeltaY
-            guard deltaY != 0 else {
-                return false
+            let scrollSteps = scrollSteps(for: event, in: terminalView, terminal: terminal)
+            guard scrollSteps != 0 else {
+                return event.hasPreciseScrollingDeltas || !event.momentumPhase.isEmpty
             }
 
             let hit = mouseHit(for: point, in: terminalView, terminal: terminal)
             let modifiers = event.modifierFlags
-            let buttonFlags = terminal.encodeButton(
-                button: deltaY > 0 ? 4 : 5,
-                release: false,
-                shift: modifiers.contains(.shift),
-                meta: modifiers.contains(.option),
-                control: modifiers.contains(.control)
-            )
+            let button = scrollSteps > 0 ? 4 : 5
 
-            terminal.sendEvent(
-                buttonFlags: buttonFlags,
-                x: hit.grid.col,
-                y: hit.grid.row,
-                pixelX: hit.pixel.col,
-                pixelY: hit.pixel.row
-            )
+            for _ in 0..<abs(scrollSteps) {
+                let buttonFlags = terminal.encodeButton(
+                    button: button,
+                    release: false,
+                    shift: modifiers.contains(.shift),
+                    meta: modifiers.contains(.option),
+                    control: modifiers.contains(.control)
+                )
+
+                terminal.sendEvent(
+                    buttonFlags: buttonFlags,
+                    x: hit.grid.col,
+                    y: hit.grid.row,
+                    pixelX: hit.pixel.col,
+                    pixelY: hit.pixel.row
+                )
+            }
             return true
+        }
+
+        private func scrollSteps(
+            for event: NSEvent,
+            in terminalView: LocalProcessTerminalView,
+            terminal: Terminal
+        ) -> Int {
+            if !event.momentumPhase.isEmpty {
+                resetPreciseScrollState()
+                return 0
+            }
+
+            let deltaY = event.scrollingDeltaY == 0 ? event.deltaY : event.scrollingDeltaY
+            guard deltaY != 0 else {
+                if !event.phase.isEmpty {
+                    resetPreciseScrollState()
+                }
+                return 0
+            }
+
+            if !event.hasPreciseScrollingDeltas {
+                resetPreciseScrollState()
+                let steps = max(Int(abs(deltaY).rounded(.awayFromZero)), 1)
+                return deltaY > 0 ? steps : -steps
+            }
+
+            let direction = deltaY > 0 ? 1 : -1
+            if direction != lastPreciseScrollDirection {
+                preciseScrollAccumulator = 0
+                lastPreciseScrollDirection = direction
+            }
+
+            let rows = max(terminal.rows, 1)
+            let lineHeight = max(terminalView.bounds.height / CGFloat(rows), 1)
+            preciseScrollAccumulator += deltaY
+
+            let steps = Int(abs(preciseScrollAccumulator) / lineHeight)
+            if steps > 0 {
+                preciseScrollAccumulator -= CGFloat(direction * steps) * lineHeight
+            }
+
+            if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+                resetPreciseScrollState()
+            }
+
+            return direction * steps
+        }
+
+        private func resetPreciseScrollState() {
+            preciseScrollAccumulator = 0
+            lastPreciseScrollDirection = 0
         }
 
         private func mouseHit(
