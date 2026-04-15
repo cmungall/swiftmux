@@ -356,7 +356,7 @@ final class SessionManager: ObservableObject {
     }
 
     nonisolated private static func createSessionWithResolvedDirectory(_ directory: String) throws -> String {
-        let baseName = inferSessionName(for: directory)
+        let baseName = try inferSessionName(for: directory)
         var attemptedNames: Set<String> = []
 
         for _ in 0..<8 {
