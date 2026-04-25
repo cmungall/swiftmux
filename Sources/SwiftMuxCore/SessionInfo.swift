@@ -1,14 +1,13 @@
 import Foundation
-import SwiftUI
 
-enum SessionStatus: String, Codable, CaseIterable, Hashable {
+public enum SessionStatus: String, Codable, CaseIterable, Hashable, Sendable {
     case active
     case idle
     case done
     case waitingHuman = "waiting-human"
     case unknown
 
-    init(rawStatus: String?) {
+    public init(rawStatus: String?) {
         guard let rawStatus else {
             self = .unknown
             return
@@ -17,7 +16,7 @@ enum SessionStatus: String, Codable, CaseIterable, Hashable {
         self = SessionStatus(rawValue: rawStatus) ?? .unknown
     }
 
-    var label: String {
+    public var label: String {
         switch self {
         case .active:
             return "Active"
@@ -32,22 +31,7 @@ enum SessionStatus: String, Codable, CaseIterable, Hashable {
         }
     }
 
-    var color: Color {
-        switch self {
-        case .active:
-            return AppTheme.activeAccent
-        case .idle:
-            return AppTheme.idleAccent
-        case .done:
-            return AppTheme.doneAccent
-        case .waitingHuman:
-            return AppTheme.waitingAccent
-        case .unknown:
-            return AppTheme.unknownAccent
-        }
-    }
-
-    var rank: Int {
+    public var rank: Int {
         switch self {
         case .active:
             return 0
@@ -63,19 +47,40 @@ enum SessionStatus: String, Codable, CaseIterable, Hashable {
     }
 }
 
-struct SessionInfo: Identifiable, Codable, Hashable {
-    struct Metadata: Codable, Hashable {
-        var repo: String?
-        let task: String?
-        let branch: String?
-        let desc: String?
-        let status: String?
+public struct SessionInfo: Identifiable, Codable, Hashable, Sendable {
+    public struct Metadata: Codable, Hashable, Sendable {
+        public var repo: String?
+        public let task: String?
+        public let branch: String?
+        public let desc: String?
+        public let status: String?
+
+        public init(
+            repo: String? = nil,
+            task: String? = nil,
+            branch: String? = nil,
+            desc: String? = nil,
+            status: String? = nil
+        ) {
+            self.repo = repo
+            self.task = task
+            self.branch = branch
+            self.desc = desc
+            self.status = status
+        }
     }
 
-    let name: String
-    let process: String
-    let workingDirectory: String
-    var metadata: Metadata
+    public let name: String
+    public let process: String
+    public let workingDirectory: String
+    public var metadata: Metadata
+
+    public init(name: String, process: String, workingDirectory: String, metadata: Metadata) {
+        self.name = name
+        self.process = process
+        self.workingDirectory = workingDirectory
+        self.metadata = metadata
+    }
 
     enum CodingKeys: String, CodingKey {
         case name
@@ -84,9 +89,9 @@ struct SessionInfo: Identifiable, Codable, Hashable {
         case metadata
     }
 
-    var id: String { name }
+    public var id: String { name }
 
-    var repoName: String {
+    public var repoName: String {
         guard let candidate = metadata.repo?.nonEmpty else {
             // No @repo metadata — infer from working directory.
             // For worktrees (~/worktrees/*), resolve the parent repo name
@@ -112,7 +117,7 @@ struct SessionInfo: Identifiable, Codable, Hashable {
         return candidate
     }
 
-    var repoGroupName: String {
+    public var repoGroupName: String {
         if let repo = repoName.nonEmpty {
             return repo
         }
@@ -130,27 +135,27 @@ struct SessionInfo: Identifiable, Codable, Hashable {
         return url.lastPathComponent.nonEmpty ?? "Ungrouped"
     }
 
-    var status: SessionStatus {
+    public var status: SessionStatus {
         SessionStatus(rawStatus: metadata.status)
     }
 
-    var detailSummary: String {
+    public var detailSummary: String {
         metadata.desc?.nonEmpty ?? metadata.task?.nonEmpty ?? shortenedWorkingDirectory
     }
 
-    var branchName: String? {
+    public var branchName: String? {
         metadata.branch?.nonEmpty
     }
 
-    var descriptionText: String? {
+    public var descriptionText: String? {
         metadata.desc?.nonEmpty
     }
 
-    var taskName: String? {
+    public var taskName: String? {
         metadata.task?.nonEmpty
     }
 
-    var shortenedWorkingDirectory: String {
+    public var shortenedWorkingDirectory: String {
         let path = workingDirectory
         let homePath = NSHomeDirectory()
 
@@ -161,7 +166,7 @@ struct SessionInfo: Identifiable, Codable, Hashable {
         return "~" + path.dropFirst(homePath.count)
     }
 
-    var searchTokens: [String] {
+    public var searchTokens: [String] {
         [
             name,
             repoGroupName,
@@ -174,7 +179,7 @@ struct SessionInfo: Identifiable, Codable, Hashable {
         .compactMap { $0?.lowercased() }
     }
 
-    static func sort(_ lhs: SessionInfo, _ rhs: SessionInfo) -> Bool {
+    public static func sort(_ lhs: SessionInfo, _ rhs: SessionInfo) -> Bool {
         if lhs.repoGroupName.localizedCaseInsensitiveCompare(rhs.repoGroupName) != .orderedSame {
             return lhs.repoGroupName.localizedCaseInsensitiveCompare(rhs.repoGroupName) == .orderedAscending
         }
@@ -187,14 +192,19 @@ struct SessionInfo: Identifiable, Codable, Hashable {
     }
 }
 
-struct SessionRepoGroup: Identifiable, Hashable {
-    let name: String
-    let sessions: [SessionInfo]
+public struct SessionRepoGroup: Identifiable, Hashable, Sendable {
+    public let name: String
+    public let sessions: [SessionInfo]
 
-    var id: String { name }
+    public init(name: String, sessions: [SessionInfo]) {
+        self.name = name
+        self.sessions = sessions
+    }
+
+    public var id: String { name }
 }
 
-private extension String {
+extension String {
     var nonEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
