@@ -1,16 +1,22 @@
 import Foundation
 
-struct CommandOutput {
-    let stdout: String
-    let stderr: String
-    let exitCode: Int32
+public struct CommandOutput {
+    public let stdout: String
+    public let stderr: String
+    public let exitCode: Int32
+
+    public init(stdout: String, stderr: String, exitCode: Int32) {
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exitCode = exitCode
+    }
 }
 
-enum CommandRunnerError: LocalizedError {
+public enum CommandRunnerError: LocalizedError {
     case missingExecutable(String)
     case executionFailed(String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .missingExecutable(let message):
             return message
@@ -20,8 +26,8 @@ enum CommandRunnerError: LocalizedError {
     }
 }
 
-enum CommandRunner {
-    static func run(
+public enum CommandRunner {
+    public static func run(
         executable: String,
         arguments: [String] = [],
         environment: [String: String] = [:]
@@ -56,7 +62,7 @@ enum CommandRunner {
         return CommandOutput(stdout: stdout, stderr: stderr, exitCode: process.terminationStatus)
     }
 
-    static func runExpectingSuccess(
+    public static func runExpectingSuccess(
         executable: String,
         arguments: [String] = [],
         environment: [String: String] = [:]
@@ -76,11 +82,11 @@ enum CommandRunner {
         return output
     }
 
-    static func baseEnvironment() -> [String: String] {
+    public static func baseEnvironment() -> [String: String] {
         mergedEnvironment(with: [:])
     }
 
-    private static func mergedEnvironment(with overrides: [String: String]) -> [String: String] {
+    public static func mergedEnvironment(with overrides: [String: String]) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = resolvedPath(existing: environment["PATH"])
         environment["LANG"] = environment["LANG"] ?? "en_US.UTF-8"

@@ -1,3 +1,4 @@
+import SwiftMuxCore
 import SwiftUI
 
 struct CommandPaletteView: View {

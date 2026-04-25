@@ -1,4 +1,5 @@
 import AppKit
+import SwiftMuxCore
 import SwiftTerm
 import SwiftUI
 

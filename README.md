@@ -1,6 +1,6 @@
 # SwiftMux
 
-A native macOS app for navigating tmux sessions. Built with SwiftUI + SwiftTerm.
+A native macOS app for navigating tmux sessions, plus an optional headless server for remote access from a phone or any browser. Built with SwiftUI + SwiftTerm; the server uses Hummingbird.
 
 ## Why
 
@@ -35,3 +35,36 @@ SwiftMux treats tmux sessions as the primary navigation object — not repos, no
 ## Dependencies
 
 - [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) — terminal emulator library
+- [Hummingbird](https://github.com/hummingbird-project/hummingbird) — HTTP/WebSocket server (server target only)
+
+## Remote access (SwiftMuxServer)
+
+`SwiftMuxServer` is a separate executable target that exposes the same session data plus a WebSocket-attached PTY, so you can drive your tmux sessions from a phone browser (PWA), the iPad, or any HTTP client on your tailnet.
+
+```bash
+# Local only, no auth (default)
+swift run SwiftMuxServer
+
+# Bind to all interfaces with a bearer token
+SWIFTMUX_HOST=0.0.0.0 SWIFTMUX_PORT=8421 SWIFTMUX_TOKEN=hunter2 \
+  swift run SwiftMuxServer
+```
+
+Endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/healthz` | Liveness probe (always unauthenticated) |
+| GET | `/api/sessions` | List sessions (`tp ls --json` + git enrichment) |
+| GET | `/api/sessions/:name/peek?lines=N` | Last N lines from a session |
+| POST | `/api/sessions/:name/kill` | Kill a session |
+| WS | `/ws/sessions/:name` | Attach a PTY to `tmux attach -t <name>` |
+
+WebSocket protocol:
+
+- Client → server: text frames are written as input bytes to the PTY (use this for keystrokes); binary frames likewise. A text frame parsed as JSON with `{"type":"resize","rows":R,"cols":C}` resizes the PTY.
+- Server → client: binary frames carrying raw PTY output bytes.
+
+For exposure beyond the loopback interface, prefer Tailscale (bind to your tailnet IP) rather than punching firewall holes. The bearer-token middleware is a backstop.
+
+A web client (xterm.js + sidebar PWA) lives at `Web/` once added — not yet built.
