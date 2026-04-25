@@ -67,4 +67,14 @@ WebSocket protocol:
 
 For exposure beyond the loopback interface, prefer Tailscale (bind to your tailnet IP) rather than punching firewall holes. The bearer-token middleware is a backstop.
 
-A web client (xterm.js + sidebar PWA) lives at `Web/` once added — not yet built.
+### Web client (PWA)
+
+A vanilla-JS client lives in `Web/`. When `SwiftMuxServer` starts in the repo root it serves the directory as static files, so opening `http://<your-mac>:8421/` in any browser gives you the sidebar + xterm.js terminal.
+
+- Mobile-first layout with a slide-in sidebar and a row of helper keys (Esc, Tab, ^C/^D/^Z/^L, arrows, `|`, `~`).
+- Fuzzy search, status-color dots, group-by-repo, just like the macOS app.
+- `manifest.webmanifest` + a small service worker — on iOS Safari, Share → "Add to Home Screen" gives an app icon and full-screen launch with no Safari chrome.
+
+xterm.js, xterm-addon-fit, and their CSS load from jsDelivr on first visit; the service worker caches them for offline reuse. No build step.
+
+To override the static root: `SWIFTMUX_WEB_ROOT=/some/other/path swift run SwiftMuxServer`.

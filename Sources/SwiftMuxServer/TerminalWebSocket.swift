@@ -6,11 +6,10 @@ import SwiftMuxCore
 
 /// Wire protocol:
 ///   client → server:
-///     • Text frame whose first char is `{` and decodes as ControlMessage → control (resize/etc.)
-///     • Otherwise text frame → write the bytes to the PTY (keyboard input)
-///     • Binary frame → write the bytes to the PTY
+///     • Binary frame → write the bytes to the PTY (keyboard input).
+///     • Text frame → JSON control message (resize, etc.).
 ///   server → client:
-///     • Binary frames carrying raw PTY output bytes
+///     • Binary frames carrying raw PTY output bytes.
 struct ControlMessage: Codable {
     let type: String
     let rows: UInt16?
@@ -51,12 +50,9 @@ enum TerminalWebSocket {
                 for try await message in inbound.messages(maxSize: 1 << 20) {
                     switch message {
                     case .text(let text):
-                        if text.first == "{",
-                           let data = text.data(using: .utf8),
+                        if let data = text.data(using: .utf8),
                            let control = try? JSONDecoder().decode(ControlMessage.self, from: data) {
                             handleControl(control, on: pty)
-                        } else {
-                            pty.write(Data(text.utf8))
                         }
                     case .binary(let buffer):
                         var buf = buffer
