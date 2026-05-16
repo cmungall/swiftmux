@@ -37,6 +37,7 @@ struct TmuxTerminalView: NSViewRepresentable {
         private weak var terminalView: LocalProcessTerminalView?
         private let terminalState: TmuxTerminalState
         private var launchedSessionName: String?
+        private var pendingSwitchSessionName: String?
         private var ttyHandshakeURL: URL?
         private var activeTTY: String?
         private var ttyPollingTask: Task<Void, Never>?
@@ -58,7 +59,9 @@ struct TmuxTerminalView: NSViewRepresentable {
         func teardown() {
             ttyPollingTask?.cancel()
             switchTask?.cancel()
+            pendingSwitchSessionName = nil
             resetPreciseScrollState()
+
             if let scrollMonitor {
                 NSEvent.removeMonitor(scrollMonitor)
                 self.scrollMonitor = nil
@@ -82,16 +85,33 @@ struct TmuxTerminalView: NSViewRepresentable {
             }
 
             guard launchedSessionName != session.name else {
+                pendingSwitchSessionName = nil
+                return
+            }
+
+            guard pendingSwitchSessionName != session.name else {
                 return
             }
 
             guard let activeTTY else {
-                terminalState.requestReconnect(for: session.name)
+                deferTerminalStateUpdate { state in
+                    state.requestReconnect(for: session.name)
+                }
                 return
             }
 
             switchTask?.cancel()
             let targetSessionName = session.name
+            pendingSwitchSessionName = targetSessionName
+            resetPreciseScrollState()
+            deferTerminalStateUpdate { state in
+                state.prepareSwitch(to: targetSessionName)
+            }
+            deferSwitch(to: targetSessionName, activeTTY: activeTTY, in: terminalView)
+        }
+
+        private func startSwitch(to targetSessionName: String, activeTTY: String) {
+            switchTask?.cancel()
             switchTask = Task.detached(priority: .userInitiated) { [weak self] in
                 do {
                     _ = try CommandRunner.runExpectingSuccess(
@@ -109,13 +129,17 @@ struct TmuxTerminalView: NSViewRepresentable {
         private func launch(sessionName: String, in terminalView: LocalProcessTerminalView) {
             ttyPollingTask?.cancel()
             switchTask?.cancel()
+            pendingSwitchSessionName = nil
 
-            let ttyHandshakeURL = terminalState.prepareLaunch(for: sessionName)
+            let ttyHandshakeURL = TmuxTerminalState.ttyHandshakeURL(for: sessionName)
             try? FileManager.default.removeItem(at: ttyHandshakeURL)
 
             self.ttyHandshakeURL = ttyHandshakeURL
             self.activeTTY = nil
             self.launchedSessionName = sessionName
+            deferTerminalStateUpdate { state in
+                state.prepareLaunch(for: sessionName)
+            }
 
             // Respect the session's existing tmux mouse configuration so native text selection keeps working.
             let shellCommand = "tty > \(shellQuoted(ttyHandshakeURL.path)); exec tmux attach-session -t \(shellQuoted(sessionName))"
@@ -152,16 +176,30 @@ struct TmuxTerminalView: NSViewRepresentable {
         }
 
         private func completeSwitch(to sessionName: String) {
+            guard lastRequestedSessionName == sessionName else {
+                return
+            }
+
             launchedSessionName = sessionName
+            pendingSwitchSessionName = nil
             terminalState.markSwitched(to: sessionName)
         }
 
         private func handleSwitchFailure(_ error: Error, sessionName: String) {
+            guard lastRequestedSessionName == sessionName else {
+                return
+            }
+
+            pendingSwitchSessionName = nil
             terminalState.reportError(error.localizedDescription)
             terminalState.requestReconnect(for: sessionName)
         }
 
         private func completeHandshake(sessionName: String, tty: String) {
+            guard lastRequestedSessionName == sessionName else {
+                return
+            }
+
             activeTTY = tty
             terminalState.markConnected(sessionName: sessionName, tty: tty)
         }
@@ -201,6 +239,34 @@ struct TmuxTerminalView: NSViewRepresentable {
             "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
         }
 
+        private func deferTerminalStateUpdate(_ update: @escaping @MainActor (TmuxTerminalState) -> Void) {
+            DispatchQueue.main.async { [terminalState] in
+                Task { @MainActor in
+                    update(terminalState)
+                }
+            }
+        }
+
+        private func deferSwitch(
+            to targetSessionName: String,
+            activeTTY: String,
+            in terminalView: LocalProcessTerminalView
+        ) {
+            DispatchQueue.main.async { [weak self, weak terminalView] in
+                Task { @MainActor [weak self, weak terminalView] in
+                    guard let self,
+                          let terminalView,
+                          self.lastRequestedSessionName == targetSessionName,
+                          self.pendingSwitchSessionName == targetSessionName else {
+                        return
+                    }
+
+                    self.prepareTerminalForSessionTransition(in: terminalView)
+                    self.startSwitch(to: targetSessionName, activeTTY: activeTTY)
+                }
+            }
+        }
+
         private func installScrollMonitorIfNeeded() {
             guard scrollMonitor == nil else {
                 return
@@ -215,26 +281,36 @@ struct TmuxTerminalView: NSViewRepresentable {
             }
         }
 
+        private func prepareTerminalForSessionTransition(in terminalView: LocalProcessTerminalView) {
+            resetPreciseScrollState()
+            // The SwiftTerm view is reused while tmux switches sessions; clear its local
+            // emulator state before tmux redraws so the scrollbar cannot expose old scrollback.
+            terminalView.feed(text: "\u{1B}c")
+        }
+
         private func handleScrollWheel(_ event: NSEvent) -> Bool {
-            guard let terminalView else {
+            guard let terminalView,
+                  let terminalWindow = terminalView.window,
+                  let eventWindow = event.window,
+                  eventWindow === terminalWindow else {
                 return false
             }
 
             let terminal = terminalView.getTerminal()
-            guard terminalView.allowMouseReporting, terminal.mouseMode != .off else {
-                return false
-            }
-
-            guard event.window === terminalView.window else {
-                return false
-            }
-
             let point = terminalView.convert(event.locationInWindow, from: nil)
             guard terminalView.bounds.contains(point) else {
+                resetPreciseScrollState()
                 return false
             }
 
             let scrollSteps = scrollSteps(for: event, in: terminalView, terminal: terminal)
+            guard terminalView.allowMouseReporting, terminal.mouseMode != .off else {
+                if scrollSteps != 0 {
+                    scrollActiveTmuxPaneInCopyMode(steps: scrollSteps)
+                }
+                return scrollSteps != 0 || event.hasPreciseScrollingDeltas || !event.momentumPhase.isEmpty
+            }
+
             guard scrollSteps != 0 else {
                 return event.hasPreciseScrollingDeltas || !event.momentumPhase.isEmpty
             }
@@ -263,13 +339,82 @@ struct TmuxTerminalView: NSViewRepresentable {
             return true
         }
 
+        private func scrollActiveTmuxPaneInCopyMode(steps: Int) {
+            let tty = activeTTY
+            let sessionName = launchedSessionName
+            let lineCount = min(max(abs(steps) * 5, 1), 200)
+            let action = steps > 0 ? "scroll-up" : "scroll-down"
+
+            Task.detached(priority: .userInitiated) {
+                guard let pane = Self.resolveActivePane(tty: tty, sessionName: sessionName) else {
+                    return
+                }
+
+                if steps > 0 {
+                    _ = try? CommandRunner.run(
+                        executable: "/usr/bin/env",
+                        arguments: ["tmux", "copy-mode", "-t", pane]
+                    )
+                }
+
+                let output = try? CommandRunner.run(
+                    executable: "/usr/bin/env",
+                    arguments: ["tmux", "send-keys", "-t", pane, "-X", "-N", String(lineCount), action]
+                )
+
+                guard steps < 0, output?.exitCode == 0 else {
+                    return
+                }
+
+                let scrollPosition = try? CommandRunner.run(
+                    executable: "/usr/bin/env",
+                    arguments: ["tmux", "display-message", "-p", "-t", pane, "#{scroll_position}"]
+                )
+                guard scrollPosition?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "0" else {
+                    return
+                }
+
+                _ = try? CommandRunner.run(
+                    executable: "/usr/bin/env",
+                    arguments: ["tmux", "send-keys", "-t", pane, "-X", "cancel"]
+                )
+            }
+        }
+
+        nonisolated private static func resolveActivePane(tty: String?, sessionName: String?) -> String? {
+            if let tty, !tty.isEmpty {
+                let output = try? CommandRunner.run(
+                    executable: "/usr/bin/env",
+                    arguments: ["tmux", "display-message", "-p", "-c", tty, "#{pane_id}"]
+                )
+                let pane = output?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if output?.exitCode == 0, !pane.isEmpty {
+                    return pane
+                }
+            }
+
+            guard let sessionName, !sessionName.isEmpty else {
+                return nil
+            }
+
+            let output = try? CommandRunner.run(
+                executable: "/usr/bin/env",
+                arguments: ["tmux", "display-message", "-p", "-t", sessionName, "#{pane_id}"]
+            )
+            let pane = output?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return output?.exitCode == 0 && !pane.isEmpty ? pane : nil
+        }
+
         private func scrollSteps(
             for event: NSEvent,
             in terminalView: LocalProcessTerminalView,
             terminal: Terminal
         ) -> Int {
-            if !event.momentumPhase.isEmpty {
+            if event.phase.contains(.began) || !event.momentumPhase.isEmpty {
                 resetPreciseScrollState()
+            }
+
+            if !event.momentumPhase.isEmpty {
                 return 0
             }
 

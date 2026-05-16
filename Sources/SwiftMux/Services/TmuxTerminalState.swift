@@ -9,13 +9,15 @@ final class TmuxTerminalState: ObservableObject {
     @Published private(set) var statusMessage = "Select a tmux session"
     @Published private(set) var lastError: String?
 
-    func prepareLaunch(for sessionName: String) -> URL {
+    func prepareLaunch(for sessionName: String) {
         connectedSessionName = nil
         currentDirectory = nil
         terminalTitle = "SwiftMux"
         statusMessage = "Attaching \(sessionName)"
         lastError = nil
+    }
 
+    static func ttyHandshakeURL(for sessionName: String) -> URL {
         let safeName = sessionName.replacingOccurrences(of: "/", with: "-")
         return FileManager.default.temporaryDirectory
             .appendingPathComponent("swiftmux-\(safeName)-\(UUID().uuidString)")
@@ -25,6 +27,13 @@ final class TmuxTerminalState: ObservableObject {
     func markConnected(sessionName: String, tty: String) {
         connectedSessionName = sessionName
         statusMessage = "Attached to \(sessionName) on \(tty)"
+        lastError = nil
+    }
+
+    func prepareSwitch(to sessionName: String) {
+        currentDirectory = nil
+        terminalTitle = "SwiftMux"
+        statusMessage = "Switching to \(sessionName)"
         lastError = nil
     }
 
