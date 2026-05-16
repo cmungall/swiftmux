@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0f1217">
+    <title>SwiftMux</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/icons/icon-192.png">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.5.0/css/xterm.min.css">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div id="app">
+        <aside id="sidebar" class="open">
+            <div class="sidebar-header">
+                <h1>SwiftMux</h1>
+                <button id="refresh-button" title="Refresh" aria-label="Refresh">↻</button>
+            </div>
+            <input id="search" type="search" placeholder="Search sessions…" autocomplete="off">
+            <div id="session-list" role="list"></div>
+            <div id="sidebar-footer">
+                <span id="status-indicator">connecting…</span>
+            </div>
+        </aside>
+
+        <main id="main">
+            <header id="topbar">
+                <button id="sidebar-toggle" aria-label="Toggle sidebar">☰</button>
+                <span id="session-title">No session</span>
+                <button id="reconnect-button" title="Reconnect" aria-label="Reconnect">⟳</button>
+            </header>
+            <div id="terminal-container">
+                <div id="terminal"></div>
+                <div id="terminal-placeholder">
+                    Pick a session from the sidebar to attach.
+                </div>
+            </div>
+            <nav id="keybar" aria-label="Mobile keys">
+                <button data-key="Escape">Esc</button>
+                <button data-key="Tab">Tab</button>
+                <button data-ctrl="c">^C</button>
+                <button data-ctrl="d">^D</button>
+                <button data-ctrl="z">^Z</button>
+                <button data-ctrl="l">^L</button>
+                <button data-key="ArrowUp">↑</button>
+                <button data-key="ArrowDown">↓</button>
+                <button data-key="ArrowLeft">←</button>
+                <button data-key="ArrowRight">→</button>
+                <button data-text="|">|</button>
+                <button data-text="~">~</button>
+            </nav>
+        </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.min.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
