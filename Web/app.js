@@ -560,11 +560,18 @@ function attachSession(name) {
     state.socket = ws;
 
     ws.addEventListener('open', () => {
+        if (state.socket !== ws || state.selectedName !== name) {
+            try { ws.close(); } catch (_) {}
+            return;
+        }
         sendResize();
         term.focus();
     });
 
     ws.addEventListener('message', (ev) => {
+        if (state.socket !== ws || state.selectedName !== name) {
+            return;
+        }
         if (typeof ev.data === 'string') {
             term.writeln(ev.data);
             return;

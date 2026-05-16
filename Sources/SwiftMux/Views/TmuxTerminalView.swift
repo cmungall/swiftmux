@@ -92,6 +92,9 @@ struct TmuxTerminalView: NSViewRepresentable {
 
             switchTask?.cancel()
             let targetSessionName = session.name
+            terminalState.prepareSwitch(to: targetSessionName)
+            prepareTerminalForSessionTransition(in: terminalView)
+
             switchTask = Task.detached(priority: .userInitiated) { [weak self] in
                 do {
                     _ = try CommandRunner.runExpectingSuccess(
@@ -116,6 +119,7 @@ struct TmuxTerminalView: NSViewRepresentable {
             self.ttyHandshakeURL = ttyHandshakeURL
             self.activeTTY = nil
             self.launchedSessionName = sessionName
+            prepareTerminalForSessionTransition(in: terminalView)
 
             // Respect the session's existing tmux mouse configuration so native text selection keeps working.
             let shellCommand = "tty > \(shellQuoted(ttyHandshakeURL.path)); exec tmux attach-session -t \(shellQuoted(sessionName))"
@@ -152,16 +156,28 @@ struct TmuxTerminalView: NSViewRepresentable {
         }
 
         private func completeSwitch(to sessionName: String) {
+            guard lastRequestedSessionName == sessionName else {
+                return
+            }
+
             launchedSessionName = sessionName
             terminalState.markSwitched(to: sessionName)
         }
 
         private func handleSwitchFailure(_ error: Error, sessionName: String) {
+            guard lastRequestedSessionName == sessionName else {
+                return
+            }
+
             terminalState.reportError(error.localizedDescription)
             terminalState.requestReconnect(for: sessionName)
         }
 
         private func completeHandshake(sessionName: String, tty: String) {
+            guard lastRequestedSessionName == sessionName else {
+                return
+            }
+
             activeTTY = tty
             terminalState.markConnected(sessionName: sessionName, tty: tty)
         }
@@ -199,6 +215,13 @@ struct TmuxTerminalView: NSViewRepresentable {
 
         private func shellQuoted(_ value: String) -> String {
             "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        }
+
+        private func prepareTerminalForSessionTransition(in terminalView: LocalProcessTerminalView) {
+            resetPreciseScrollState()
+            // The SwiftTerm view is reused while tmux switches sessions; clear its local
+            // emulator state before tmux redraws so the scrollbar cannot expose old scrollback.
+            terminalView.feed(text: "\u{1B}c")
         }
 
         private func installScrollMonitorIfNeeded() {
