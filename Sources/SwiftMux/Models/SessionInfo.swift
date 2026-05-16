@@ -103,6 +103,11 @@ struct SessionInfo: Identifiable, Codable, Hashable {
         let desc: String?
         let status: String?
         let lastSend: String?
+        let pr: String?
+        let prState: String?
+        let prReview: String?
+        let prMergeState: String?
+        let lastRefresh: String?
 
         enum CodingKeys: String, CodingKey {
             case repo
@@ -111,6 +116,11 @@ struct SessionInfo: Identifiable, Codable, Hashable {
             case desc
             case status
             case lastSend = "last_send"
+            case pr
+            case prState = "pr_state"
+            case prReview = "pr_review"
+            case prMergeState = "pr_merge_state"
+            case lastRefresh = "last_refresh"
         }
     }
 
@@ -119,6 +129,7 @@ struct SessionInfo: Identifiable, Codable, Hashable {
     let workingDirectory: String
     var metadata: Metadata
     var canonicalRepoRoot: String? = nil
+    var githubRepoSlug: String? = nil
     var tmuxActivityAt: Date? = nil
 
     enum CodingKeys: String, CodingKey {
@@ -230,13 +241,169 @@ struct SessionInfo: Identifiable, Codable, Hashable {
     }
 
     var lastSendAt: Date? {
-        guard let timestamp = metadata.lastSend?.nonEmpty else {
+        Self.parseISO8601Timestamp(metadata.lastSend)
+    }
+
+    var pullRequestNumber: String? {
+        metadata.pr?.nonEmpty
+    }
+
+    var pullRequestState: String? {
+        metadata.prState?.nonEmpty
+    }
+
+    var pullRequestReview: String? {
+        metadata.prReview?.nonEmpty
+    }
+
+    var pullRequestMergeState: String? {
+        metadata.prMergeState?.nonEmpty
+    }
+
+    var pullRequestLastRefreshAt: Date? {
+        Self.parseISO8601Timestamp(metadata.lastRefresh)
+    }
+
+    var pullRequestSummary: String? {
+        guard let pr = pullRequestNumber else {
             return nil
         }
 
-        return Self.iso8601Formatters.lazy.compactMap { formatter in
-            formatter.date(from: timestamp)
-        }.first
+        switch pullRequestState {
+        case "MERGED":
+            return "\(pr) M"
+        case "CLOSED":
+            return "\(pr) X"
+        default:
+            break
+        }
+
+        var codes: [String] = []
+
+        switch pullRequestReview {
+        case "APPROVED":
+            codes.append("A")
+        case "CHANGES_REQUESTED":
+            codes.append("CR")
+        case "REVIEW_REQUIRED":
+            codes.append("RR")
+        case "PENDING":
+            codes.append("P")
+        default:
+            break
+        }
+
+        switch pullRequestMergeState {
+        case "DIRTY":
+            codes.append("D")
+        case "BLOCKED":
+            codes.append("B")
+        case "CLEAN":
+            codes.append("C")
+        default:
+            break
+        }
+
+        guard !codes.isEmpty else {
+            return pr
+        }
+
+        return "\(pr) \(codes.joined(separator: " "))"
+    }
+
+    var pullRequestTint: Color {
+        switch pullRequestState {
+        case "MERGED":
+            return AppTheme.doneAccent
+        case "CLOSED":
+            return AppTheme.unknownAccent
+        default:
+            break
+        }
+
+        if pullRequestReview == "CHANGES_REQUESTED"
+            || pullRequestMergeState == "DIRTY"
+            || pullRequestMergeState == "BLOCKED" {
+            return AppTheme.waitingAccent
+        }
+
+        if pullRequestReview == "APPROVED" || pullRequestMergeState == "CLEAN" {
+            return AppTheme.activeAccent
+        }
+
+        return AppTheme.idleAccent
+    }
+
+    var pullRequestURL: URL? {
+        guard let pr = pullRequestNumber,
+              let repoSlug = githubRepoSlug?.nonEmpty else {
+            return nil
+        }
+
+        return URL(string: "https://github.com/\(repoSlug)/pull/\(pr)")
+    }
+
+    var shouldShowMergePullRequestAction: Bool {
+        pullRequestState == "OPEN"
+            && pullRequestReview == "APPROVED"
+            && pullRequestNumber != nil
+            && githubRepoSlug?.nonEmpty != nil
+    }
+
+    var canExecuteMergePullRequest: Bool {
+        guard shouldShowMergePullRequestAction else {
+            return false
+        }
+
+        switch pullRequestMergeState {
+        case "DIRTY", "BLOCKED":
+            return false
+        default:
+            return true
+        }
+    }
+
+    var mergePullRequestHelpText: String {
+        switch pullRequestMergeState {
+        case "DIRTY":
+            return "PR is approved but has merge conflicts."
+        case "BLOCKED":
+            return "PR is approved but blocked by repository rules or pending requirements."
+        default:
+            if let pr = pullRequestNumber {
+                return "Merge PR #\(pr) on GitHub."
+            }
+            return "Merge approved PR."
+        }
+    }
+
+    var pullRequestHelpText: String? {
+        guard let pr = pullRequestNumber else {
+            return nil
+        }
+
+        var parts = ["PR #\(pr)"]
+
+        if let state = Self.displayLabel(forPullRequestState: pullRequestState) {
+            parts.append(state)
+        }
+        if let review = Self.displayLabel(forPullRequestReview: pullRequestReview) {
+            parts.append(review)
+        }
+        if let mergeState = Self.displayLabel(forPullRequestMergeState: pullRequestMergeState) {
+            parts.append(mergeState)
+        }
+        if let lastRefreshAt = pullRequestLastRefreshAt {
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .full
+            parts.append("Updated \(formatter.localizedString(for: lastRefreshAt, relativeTo: Date()))")
+        }
+
+        if pullRequestURL != nil {
+            parts.append("Click to open on GitHub.")
+        }
+
+        return parts.joined(separator: " · ")
     }
 
     var activityAt: Date? {
@@ -335,6 +502,10 @@ struct SessionInfo: Identifiable, Codable, Hashable {
             metadata.task,
             metadata.branch,
             metadata.desc,
+            metadata.pr,
+            metadata.prState,
+            metadata.prReview,
+            metadata.prMergeState,
             workingDirectory
         ]
         .compactMap { $0?.lowercased() }
@@ -361,6 +532,61 @@ struct SessionInfo: Identifiable, Codable, Hashable {
 
         return [fractional, plain]
     }()
+
+    private static func parseISO8601Timestamp(_ value: String?) -> Date? {
+        guard let timestamp = value?.nonEmpty else {
+            return nil
+        }
+
+        return iso8601Formatters.lazy.compactMap { formatter in
+            formatter.date(from: timestamp)
+        }.first
+    }
+
+    private static func displayLabel(forPullRequestState value: String?) -> String? {
+        switch value {
+        case "OPEN":
+            return "Open"
+        case "CLOSED":
+            return "Closed"
+        case "MERGED":
+            return "Merged"
+        default:
+            return value?.nonEmpty
+        }
+    }
+
+    private static func displayLabel(forPullRequestReview value: String?) -> String? {
+        switch value {
+        case "APPROVED":
+            return "Approved"
+        case "CHANGES_REQUESTED":
+            return "Changes Requested"
+        case "REVIEW_REQUIRED":
+            return "Review Required"
+        case "PENDING":
+            return "Pending Review"
+        default:
+            return value?.nonEmpty
+        }
+    }
+
+    private static func displayLabel(forPullRequestMergeState value: String?) -> String? {
+        switch value {
+        case "DIRTY":
+            return "Conflicted"
+        case "BLOCKED":
+            return "Blocked"
+        case "CLEAN":
+            return "Mergeable"
+        case "UNSTABLE":
+            return "Unstable"
+        case "UNKNOWN":
+            return nil
+        default:
+            return value?.nonEmpty
+        }
+    }
 }
 
 struct SessionGroup: Identifiable, Hashable {

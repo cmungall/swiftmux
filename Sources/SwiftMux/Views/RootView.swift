@@ -6,12 +6,19 @@ struct RootView: View {
     @StateObject private var terminalState = TmuxTerminalState()
     @State private var commandPalettePresented = false
     @State private var newSessionSheetPresented = false
-    @State private var newSessionDirectory = ""
+    @State private var newSessionRepositoryPath = ""
+    @State private var newSessionProfile: SessionCreationProfile?
+    @State private var newSessionTaskDescription = ""
+    @State private var newSessionIssueNumber = ""
+    @State private var newSessionBossMode = false
     @State private var newSessionError: String?
     @State private var newSessionInFlight = false
-    @State private var creationAlertMessage: String?
+    @State private var alertTitle = "SwiftMux"
+    @State private var alertMessage: String?
     @State private var helpPresented = false
     @State private var helpTopic: SwiftMuxHelpTopic = .overview
+    @State private var toolPreview: ToolCommandPreview?
+    @State private var toolCommandInFlight = false
 
     var body: some View {
         NavigationView {
@@ -28,6 +35,12 @@ struct RootView: View {
                 terminalState: terminalState,
                 onOpenHelp: { presentHelp(topic: .sessions) },
                 onRefresh: refreshSessions,
+                onMergePullRequest: { session in
+                    try await sessionManager.mergePullRequest(for: session)
+                },
+                onProd: { session in
+                    try await sessionManager.runProd(for: session)
+                },
                 onRename: { session, name in
                     try await sessionManager.renameSession(session, to: name)
                 },
@@ -38,15 +51,21 @@ struct RootView: View {
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
                 Menu {
+                    Button("New Session…") {
+                        presentNewSessionSheet()
+                    }
+
+                    Divider()
+
                     if let selectedRepoTarget {
-                        Button("In Selected Repo (\(selectedRepoTarget.name))") {
+                        Button("Quick Session in Selected Repo (\(selectedRepoTarget.name))") {
                             createSession(in: selectedRepoTarget.path)
                         }
                     }
 
                     if let selectedFolderTarget,
                        selectedFolderTarget.path != selectedRepoTarget?.path {
-                        Button("In Selected Folder (\(selectedFolderTarget.name))") {
+                        Button("Quick Session in Selected Folder (\(selectedFolderTarget.name))") {
                             createSession(in: selectedFolderTarget.path)
                         }
                     }
@@ -61,12 +80,6 @@ struct RootView: View {
                                 }
                             }
                         }
-                    }
-
-                    Divider()
-
-                    Button("Other…") {
-                        presentNewSessionSheet()
                     }
                 } label: {
                     Label("New", systemImage: "plus")
@@ -96,9 +109,18 @@ struct RootView: View {
         }
         .sheet(isPresented: $newSessionSheetPresented) {
             NewSessionSheetView(
-                directory: $newSessionDirectory,
+                repositoryPath: $newSessionRepositoryPath,
+                selectedProfile: $newSessionProfile,
+                taskDescription: $newSessionTaskDescription,
+                issueNumber: $newSessionIssueNumber,
+                isBossSession: $newSessionBossMode,
+                knownRepos: knownRepoTargets,
                 errorMessage: newSessionError,
                 isSubmitting: newSessionInFlight,
+                onChooseRepository: chooseSessionRepository,
+                onChooseKnownRepository: { target in
+                    newSessionRepositoryPath = target.path
+                },
                 onCancel: {
                     guard !newSessionInFlight else {
                         return
@@ -109,12 +131,12 @@ struct RootView: View {
                 onSubmit: submitNewSession
             )
         }
-        .alert("Couldn’t create session", isPresented: creationAlertPresented) {
+        .alert(alertTitle, isPresented: alertPresented) {
             Button("OK", role: .cancel) {
-                creationAlertMessage = nil
+                alertMessage = nil
             }
         } message: {
-            Text(creationAlertMessage ?? "")
+            Text(alertMessage ?? "")
         }
         .sheet(isPresented: $helpPresented) {
             SwiftMuxHelpSheet(
@@ -124,8 +146,14 @@ struct RootView: View {
                 onRefresh: refreshSessions
             )
         }
+        .sheet(item: $toolPreview) { preview in
+            ToolCommandPreviewSheet(preview: preview)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxOpenCommandPalette)) { _ in
             commandPalettePresented = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxOpenNewSession)) { _ in
+            presentNewSessionSheet()
         }
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxShowHelp)) { notification in
             let topic = (notification.userInfo?["topic"] as? String)
@@ -135,17 +163,29 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxRefreshSessions)) { _ in
             refreshSessions()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxRefreshPullRequests)) { _ in
+            let selectedSessionName = sessionManager.selectedSession.map(\.name)
+            Task {
+                await sessionManager.refreshPullRequestMetadata(
+                    for: selectedSessionName.map { [$0] }
+                )
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxRunReap)) { notification in
+            let dryRun = notification.userInfo?["dryRun"] as? Bool ?? false
+            runReapCommand(dryRun: dryRun)
+        }
         .task {
             sessionManager.startPolling()
         }
     }
 
-    private var creationAlertPresented: Binding<Bool> {
+    private var alertPresented: Binding<Bool> {
         Binding(
-            get: { creationAlertMessage != nil },
+            get: { alertMessage != nil },
             set: { isPresented in
                 if !isPresented {
-                    creationAlertMessage = nil
+                    alertMessage = nil
                 }
             }
         )
@@ -188,17 +228,67 @@ struct RootView: View {
         return targets
     }
 
-    private func presentNewSessionSheet(prefilledDirectory: String = "") {
-        newSessionDirectory = prefilledDirectory
+    private var knownRepoTargets: [SessionCreationTarget] {
+        var seen: Set<String> = []
+        var targets: [SessionCreationTarget] = []
+
+        if let selectedRepoTarget,
+           seen.insert(selectedRepoTarget.path).inserted {
+            targets.append(selectedRepoTarget)
+        }
+
+        for target in recentRepoTargets where seen.insert(target.path).inserted {
+            targets.append(target)
+        }
+
+        return targets
+    }
+
+    private func presentNewSessionSheet(prefilledRepository: String? = nil) {
+        let initialRepository: String
+        if let prefilledRepository,
+           !prefilledRepository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            initialRepository = prefilledRepository
+        } else {
+            initialRepository = selectedRepoTarget?.path ?? ""
+        }
+
+        newSessionRepositoryPath = initialRepository
+        newSessionProfile = nil
+        newSessionTaskDescription = ""
+        newSessionIssueNumber = ""
+        newSessionBossMode = false
         newSessionError = nil
         newSessionInFlight = false
         newSessionSheetPresented = true
     }
 
     private func submitNewSession() {
-        let trimmedDirectory = newSessionDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedDirectory.isEmpty else {
-            newSessionError = "Repo or folder path cannot be empty."
+        let trimmedRepository = newSessionRepositoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRepository.isEmpty else {
+            newSessionError = "Repo path cannot be empty."
+            return
+        }
+
+        guard let selectedProfile = newSessionProfile else {
+            newSessionError = "Choose an agent profile."
+            return
+        }
+
+        let trimmedTaskDescription = newSessionTaskDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedIssueNumber = newSessionIssueNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        let issueNumber: Int?
+        if trimmedIssueNumber.isEmpty {
+            issueNumber = nil
+        } else if let parsed = Int(trimmedIssueNumber) {
+            issueNumber = parsed
+        } else {
+            newSessionError = "Issue number must be numeric."
+            return
+        }
+
+        if !newSessionBossMode, issueNumber == nil, trimmedTaskDescription.isEmpty {
+            newSessionError = "Provide an issue number or task description."
             return
         }
 
@@ -207,7 +297,15 @@ struct RootView: View {
 
         Task {
             do {
-                try await sessionManager.createSession(in: trimmedDirectory)
+                try await sessionManager.createSession(
+                    using: SessionCreationRequest(
+                        repoPath: trimmedRepository,
+                        profile: selectedProfile,
+                        issueNumber: issueNumber,
+                        description: trimmedTaskDescription.isEmpty ? nil : trimmedTaskDescription,
+                        isBossSession: newSessionBossMode
+                    )
+                )
                 await MainActor.run {
                     newSessionInFlight = false
                     newSessionSheetPresented = false
@@ -227,10 +325,33 @@ struct RootView: View {
                 try await sessionManager.createSession(in: directory)
             } catch {
                 await MainActor.run {
-                    creationAlertMessage = error.localizedDescription
+                    presentAlert(title: "Couldn’t create session", message: error.localizedDescription)
                 }
             }
         }
+    }
+
+    private func chooseSessionRepository() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Repo"
+        panel.prompt = "Choose"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+
+        let startingPath = newSessionRepositoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !startingPath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: (startingPath as NSString).expandingTildeInPath)
+        } else if let selectedRepoTarget {
+            panel.directoryURL = URL(fileURLWithPath: selectedRepoTarget.path)
+        }
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        newSessionRepositoryPath = url.path
     }
 
     private func presentHelp(topic: SwiftMuxHelpTopic = .overview) {
@@ -247,6 +368,51 @@ struct RootView: View {
             await sessionManager.refresh()
         }
     }
+
+    private func runReapCommand(dryRun: Bool) {
+        guard !toolCommandInFlight else {
+            return
+        }
+
+        toolCommandInFlight = true
+
+        Task {
+            do {
+                let output = try await sessionManager.runReap(dryRun: dryRun)
+                let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                await MainActor.run {
+                    toolCommandInFlight = false
+
+                    if dryRun || !trimmedOutput.isEmpty {
+                        toolPreview = ToolCommandPreview(
+                            title: dryRun ? "tp reap --dry-run" : "tp reap",
+                            output: trimmedOutput.isEmpty ? "No output returned." : trimmedOutput
+                        )
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    toolCommandInFlight = false
+                    presentAlert(
+                        title: dryRun ? "Couldn’t preview tp reap" : "Couldn’t run tp reap",
+                        message: error.localizedDescription
+                    )
+                }
+            }
+        }
+    }
+
+    private func presentAlert(title: String, message: String) {
+        alertTitle = title
+        alertMessage = message
+    }
+}
+
+private struct ToolCommandPreview: Identifiable {
+    let id = UUID()
+    let title: String
+    let output: String
 }
 
 private struct SessionCreationTarget: Identifiable, Hashable {
@@ -288,6 +454,7 @@ private struct SessionSidebarView: View {
     private var orderingModeStorage = SessionOrderingMode.activity.rawValue
     @State private var tab: SidebarTab = .recent
     @State private var searchText = ""
+    @State private var guidanceDismissed = false
     @FocusState private var focusTarget: FocusTarget?
     var onCreateInDirectory: ((String) -> Void)?
 
@@ -361,6 +528,8 @@ private struct SessionSidebarView: View {
             session.repoGroupName,
             session.folderGroupName,
             session.branchName ?? "",
+            session.pullRequestNumber ?? "",
+            session.pullRequestSummary ?? "",
             session.process,
         ].joined(separator: " ")
         return fuzzyMatch(query: searchText, in: haystack)
@@ -435,9 +604,19 @@ private struct SessionSidebarView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
 
-            SidebarGuidanceCard(onOpenHelp: onOpenHelp)
+            if !guidanceDismissed {
+                SidebarGuidanceCard(
+                    onOpenHelp: onOpenHelp,
+                    onDismiss: {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            guidanceDismissed = true
+                        }
+                    }
+                )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             List(selection: selectionBinding) {
                 if let pollError = sessionManager.pollError {
@@ -643,6 +822,9 @@ private struct SessionRowView: View {
                 if let branch = session.branchName {
                     Text(branch)
                 }
+                if session.pullRequestSummary != nil {
+                    SessionPullRequestBadgeView(session: session)
+                }
                 Text(session.status.label)
                 if session.activityAt != nil {
                     SessionActivityBadgeView(session: session)
@@ -717,6 +899,21 @@ private struct SessionRowView: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(session.name, forType: .string)
+    }
+}
+
+private struct SessionPullRequestBadgeView: View {
+    let session: SessionInfo
+
+    var body: some View {
+        Text("PR \(session.pullRequestSummary ?? "")")
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .foregroundColor(.white.opacity(0.95))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(session.pullRequestTint.opacity(0.86))
+            .clipShape(Capsule())
+            .help(session.pullRequestHelpText ?? "Pull request summary")
     }
 }
 
@@ -816,6 +1013,8 @@ private struct SessionDetailView: View {
     @ObservedObject var terminalState: TmuxTerminalState
     let onOpenHelp: () -> Void
     let onRefresh: () -> Void
+    var onMergePullRequest: ((SessionInfo) async throws -> Void)?
+    var onProd: ((SessionInfo) async throws -> String)?
     var onRename: ((SessionInfo, String) async throws -> Void)?
     var onKill: ((SessionInfo) -> Void)?
     @State private var renameSheetPresented = false
@@ -823,6 +1022,11 @@ private struct SessionDetailView: View {
     @State private var renameError: String?
     @State private var renameInFlight = false
     @State private var killConfirmationPresented = false
+    @State private var mergeInFlight = false
+    @State private var mergeError: String?
+    @State private var prodInFlight = false
+    @State private var prodError: String?
+    @State private var prodPreview: ToolCommandPreview?
 
     var body: some View {
         ZStack {
@@ -847,15 +1051,59 @@ private struct SessionDetailView: View {
                                 }
                             }
 
-                            Text(terminalState.currentDirectory ?? session.shortenedWorkingDirectory)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(AppTheme.mutedText)
-                                .lineLimit(1)
+                            HStack(alignment: .center, spacing: 10) {
+                                Text(terminalState.currentDirectory ?? session.shortenedWorkingDirectory)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(AppTheme.mutedText)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+
+                                if session.pullRequestSummary != nil {
+                                    PullRequestSummaryChip(session: session)
+                                        .fixedSize()
+                                }
+                            }
                         }
 
                         Spacer()
 
                         HStack(spacing: 10) {
+                            if session.shouldShowMergePullRequestAction {
+                                Button {
+                                    submitMerge(for: session)
+                                } label: {
+                                    if mergeInFlight {
+                                        HStack(spacing: 8) {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                            Text("Merging…")
+                                        }
+                                    } else {
+                                        Label("Merge PR", systemImage: "arrow.triangle.merge")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(mergeInFlight || !session.canExecuteMergePullRequest)
+                                .help(session.mergePullRequestHelpText)
+                            }
+
+                            Button {
+                                submitProd(for: session)
+                            } label: {
+                                if prodInFlight {
+                                    HStack(spacing: 8) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                        Text("Prodding…")
+                                    }
+                                } else {
+                                    Label("Prod", systemImage: "paperplane")
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(prodInFlight)
+                            .help("Run `tp prod` for this session.")
+
                             Button {
                                 presentRenameSheet(for: session)
                             } label: {
@@ -889,6 +1137,36 @@ private struct SessionDetailView: View {
 
                             Button("Reconnect") {
                                 terminalState.requestReconnect(for: session.name)
+                            }
+                        }
+                    }
+
+                    if let mergeError {
+                        HStack {
+                            Text(mergeError)
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
+                                .foregroundColor(.red.opacity(0.9))
+                                .textSelection(.enabled)
+
+                            Spacer(minLength: 12)
+
+                            Button("Dismiss") {
+                                self.mergeError = nil
+                            }
+                        }
+                    }
+
+                    if let prodError {
+                        HStack {
+                            Text(prodError)
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
+                                .foregroundColor(.red.opacity(0.9))
+                                .textSelection(.enabled)
+
+                            Spacer(minLength: 12)
+
+                            Button("Dismiss") {
+                                self.prodError = nil
                             }
                         }
                     }
@@ -963,6 +1241,9 @@ private struct SessionDetailView: View {
                 )
             }
         }
+        .sheet(item: $prodPreview) { preview in
+            ToolCommandPreviewSheet(preview: preview)
+        }
         .alert("Sure?", isPresented: $killConfirmationPresented, presenting: session) { session in
             Button("Kill Session", role: .destructive) {
                 onKill?(session)
@@ -971,6 +1252,13 @@ private struct SessionDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: { session in
             Text("This will terminate the tmux session named \(session.name).")
+        }
+        .onChange(of: session?.id) { _ in
+            mergeInFlight = false
+            mergeError = nil
+            prodInFlight = false
+            prodError = nil
+            prodPreview = nil
         }
     }
 
@@ -1010,6 +1298,98 @@ private struct SessionDetailView: View {
                 }
             }
         }
+    }
+
+    private func submitMerge(for session: SessionInfo) {
+        guard !mergeInFlight else {
+            return
+        }
+
+        mergeError = nil
+        mergeInFlight = true
+
+        Task {
+            do {
+                try await onMergePullRequest?(session)
+                await MainActor.run {
+                    mergeInFlight = false
+                }
+            } catch {
+                await MainActor.run {
+                    mergeInFlight = false
+                    mergeError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func submitProd(for session: SessionInfo) {
+        guard !prodInFlight else {
+            return
+        }
+
+        prodError = nil
+        prodInFlight = true
+
+        Task {
+            do {
+                let output = try await onProd?(session) ?? ""
+                let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                await MainActor.run {
+                    prodInFlight = false
+
+                    if !trimmedOutput.isEmpty {
+                        prodPreview = ToolCommandPreview(
+                            title: "tp prod · \(session.name)",
+                            output: trimmedOutput
+                        )
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    prodInFlight = false
+                    prodError = error.localizedDescription
+                }
+            }
+        }
+    }
+}
+
+private struct PullRequestSummaryChip: View {
+    let session: SessionInfo
+
+    var body: some View {
+        Group {
+            if let url = session.pullRequestURL {
+                Button {
+                    NSWorkspace.shared.open(url)
+                } label: {
+                    chipLabel(showLinkIcon: true)
+                }
+                .buttonStyle(.plain)
+            } else {
+                chipLabel(showLinkIcon: false)
+            }
+        }
+        .help(session.pullRequestHelpText ?? "Pull request summary")
+    }
+
+    @ViewBuilder
+    private func chipLabel(showLinkIcon: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text("PR \(session.pullRequestSummary ?? "")")
+            if showLinkIcon {
+                Image(systemName: "arrow.up.right.square")
+                    .font(.system(size: 9, weight: .bold))
+            }
+        }
+        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+        .foregroundColor(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(session.pullRequestTint.opacity(0.88))
+        .clipShape(Capsule())
     }
 }
 
@@ -1097,35 +1477,155 @@ private struct RenameSessionSheetView: View {
 }
 
 private struct NewSessionSheetView: View {
-    @Binding var directory: String
+    @Binding var repositoryPath: String
+    @Binding var selectedProfile: SessionCreationProfile?
+    @Binding var taskDescription: String
+    @Binding var issueNumber: String
+    @Binding var isBossSession: Bool
+    let knownRepos: [SessionCreationTarget]
     let errorMessage: String?
     let isSubmitting: Bool
+    let onChooseRepository: () -> Void
+    let onChooseKnownRepository: (SessionCreationTarget) -> Void
     let onCancel: () -> Void
     let onSubmit: () -> Void
-    @FocusState private var directoryFieldFocused: Bool
+    @FocusState private var focusedField: Field?
 
-    private var trimmedDirectory: String {
-        directory.trimmingCharacters(in: .whitespacesAndNewlines)
+    private enum Field: Hashable {
+        case repository
+        case issue
+        case task
+    }
+
+    private var trimmedRepositoryPath: String {
+        repositoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedTaskDescription: String {
+        taskDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedIssueNumber: String {
+        issueNumber.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("New Session")
                 .font(.system(size: 17, weight: .bold, design: .rounded))
 
-            Text("Enter the repo or folder path to open with `tp new -c`.")
+            Text("Choose a repo, then create either a boss session in-place or a task session in a fresh worktree.")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundColor(AppTheme.mutedText)
 
-            TextField("Repo or folder path", text: $directory)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13, weight: .medium, design: .monospaced))
-                .focused($directoryFieldFocused)
-                .onSubmit {
-                    if !isCreateDisabled {
-                        onSubmit()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Repo")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundColor(AppTheme.mutedText)
+
+                HStack(spacing: 10) {
+                    TextField("Repo path", text: $repositoryPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .focused($focusedField, equals: .repository)
+                        .onSubmit {
+                            if !isCreateDisabled {
+                                onSubmit()
+                            }
+                        }
+
+                    Button("Choose…") {
+                        onChooseRepository()
+                    }
+                    .disabled(isSubmitting)
+                }
+            }
+
+            if !knownRepos.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Known Repos")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundColor(AppTheme.mutedText)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(knownRepos) { target in
+                                Button(target.name) {
+                                    onChooseKnownRepository(target)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .help(target.path)
+                            }
+                        }
                     }
                 }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Agent Profile")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundColor(AppTheme.mutedText)
+
+                Picker("Agent Profile", selection: $selectedProfile) {
+                    Text("Choose Profile").tag(SessionCreationProfile?.none)
+                    ForEach(SessionCreationProfile.allCases) { profile in
+                        Text(profile.title).tag(SessionCreationProfile?.some(profile))
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(isSubmitting)
+
+                if let selectedProfile {
+                    Text(selectedProfile.commandSummary)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(AppTheme.mutedText)
+                }
+            }
+
+            Toggle("Boss session", isOn: $isBossSession)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+
+            if isBossSession {
+                Text("Boss sessions launch the selected profile in the selected checkout without creating a task worktree.")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundColor(AppTheme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Issue Number")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(AppTheme.mutedText)
+
+                        TextField("771", text: $issueNumber)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                            .focused($focusedField, equals: .issue)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Task Description")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(AppTheme.mutedText)
+
+                        TextField("oauth cleanup, ci hardening, parser pass…", text: $taskDescription)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .focused($focusedField, equals: .task)
+                            .onSubmit {
+                                if !isCreateDisabled {
+                                    onSubmit()
+                                }
+                            }
+                    }
+
+                    Text("Provide either an issue number or a task description. If you provide both, the description is used for the session name.")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundColor(AppTheme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
 
             if let errorMessage {
                 Text(errorMessage)
@@ -1151,15 +1651,27 @@ private struct NewSessionSheetView: View {
             }
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: 560)
         .background(AppTheme.panelBackground)
         .onAppear {
-            directoryFieldFocused = true
+            focusedField = trimmedRepositoryPath.isEmpty ? .repository : (isBossSession ? nil : .task)
         }
     }
 
     private var isCreateDisabled: Bool {
-        isSubmitting || trimmedDirectory.isEmpty
+        if isSubmitting || trimmedRepositoryPath.isEmpty {
+            return true
+        }
+
+        if selectedProfile == nil {
+            return true
+        }
+
+        if isBossSession {
+            return false
+        }
+
+        return trimmedIssueNumber.isEmpty && trimmedTaskDescription.isEmpty
     }
 }
 
@@ -1178,5 +1690,40 @@ private struct MetadataLine: View {
                 .font(.system(size: 12, weight: .regular, design: .monospaced))
                 .textSelection(.enabled)
         }
+    }
+}
+
+private struct ToolCommandPreviewSheet: View {
+    let preview: ToolCommandPreview
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top) {
+                Text(preview.title)
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+
+                Spacer(minLength: 20)
+
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+
+            ScrollView {
+                Text(preview.output)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(14)
+            }
+            .background(AppTheme.windowBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .padding(20)
+        .frame(width: 720, height: 520)
+        .background(AppTheme.panelBackground)
     }
 }

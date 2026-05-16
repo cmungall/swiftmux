@@ -152,6 +152,7 @@ struct SwiftMuxHelpSheet: View {
 
 struct SidebarGuidanceCard: View {
     let onOpenHelp: () -> Void
+    let onDismiss: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -173,6 +174,18 @@ struct SidebarGuidanceCard: View {
             }
 
             Spacer(minLength: 0)
+
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(AppTheme.mutedText)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss tips")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

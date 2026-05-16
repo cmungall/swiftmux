@@ -1,5 +1,98 @@
 import Foundation
 
+struct SessionCreationRequest {
+    let repoPath: String
+    let profile: SessionCreationProfile
+    let issueNumber: Int?
+    let description: String?
+    let isBossSession: Bool
+}
+
+enum SessionCreationProfile: String, CaseIterable, Identifiable, Hashable {
+    case codex
+    case claude
+    case pi
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .codex:
+            return "Codex"
+        case .claude:
+            return "Claude"
+        case .pi:
+            return "Pi"
+        }
+    }
+
+    var commandSummary: String {
+        switch self {
+        case .codex:
+            return "codex --profile yolo"
+        case .claude:
+            return "claude --permission-mode bypassPermissions"
+        case .pi:
+            return "pi --offline"
+        }
+    }
+}
+
+private enum PullRequestMergeStrategy: String, Decodable {
+    case merge = "MERGE"
+    case rebase = "REBASE"
+    case squash = "SQUASH"
+
+    var flag: String {
+        switch self {
+        case .merge:
+            return "--merge"
+        case .rebase:
+            return "--rebase"
+        case .squash:
+            return "--squash"
+        }
+    }
+}
+
+private struct RepoMergeConfiguration: Decodable {
+    let viewerDefaultMergeMethod: PullRequestMergeStrategy?
+    let mergeCommitAllowed: Bool
+    let rebaseMergeAllowed: Bool
+    let squashMergeAllowed: Bool
+
+    var preferredStrategy: PullRequestMergeStrategy? {
+        if let viewerDefaultMergeMethod, isAllowed(viewerDefaultMergeMethod) {
+            return viewerDefaultMergeMethod
+        }
+
+        if mergeCommitAllowed {
+            return .merge
+        }
+
+        if squashMergeAllowed {
+            return .squash
+        }
+
+        if rebaseMergeAllowed {
+            return .rebase
+        }
+
+        return nil
+    }
+
+    private func isAllowed(_ strategy: PullRequestMergeStrategy) -> Bool {
+        switch strategy {
+        case .merge:
+            return mergeCommitAllowed
+        case .rebase:
+            return rebaseMergeAllowed
+        case .squash:
+            return squashMergeAllowed
+        }
+    }
+}
+
 enum SessionOrderingMode: String, CaseIterable, Hashable {
     case activity = "activity"
     case `default` = "default"
@@ -183,6 +276,24 @@ final class SessionManager: ObservableObject {
         }
     }
 
+    func createSession(using request: SessionCreationRequest) async throws {
+        let trimmedRepoPath = request.repoPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRepoPath.isEmpty else {
+            throw CommandRunnerError.executionFailed("Repo path cannot be empty.")
+        }
+
+        let resolvedRepoPath = (trimmedRepoPath as NSString).expandingTildeInPath
+        let createdSessionName = try await Task.detached(priority: .userInitiated) {
+            try Self.createSession(using: request, resolvedRepoPath: resolvedRepoPath)
+        }.value
+
+        await refresh()
+
+        if sessions.contains(where: { $0.id == createdSessionName }) {
+            selectSession(id: createdSessionName)
+        }
+    }
+
     func refresh() async {
         do {
             let loadedSessions = try await Task.detached(priority: .userInitiated) {
@@ -199,6 +310,58 @@ final class SessionManager: ObservableObject {
         } catch {
             pollError = error.localizedDescription
         }
+    }
+
+    func refreshPullRequestMetadata(for sessionNames: [String]? = nil) async {
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try Self.runPullRequestRefresh(sessionNames: sessionNames)
+            }.value
+
+            await refresh()
+        } catch {
+            pollError = error.localizedDescription
+        }
+    }
+
+    func mergePullRequest(for session: SessionInfo) async throws {
+        guard let pullRequestNumber = session.pullRequestNumber else {
+            throw CommandRunnerError.executionFailed("No pull request is associated with this session.")
+        }
+
+        guard let repoSlug = session.githubRepoSlug,
+              !repoSlug.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CommandRunnerError.executionFailed("Could not resolve the GitHub repository for this session.")
+        }
+
+        try await Task.detached(priority: .userInitiated) {
+            try Self.mergePullRequest(number: pullRequestNumber, repoSlug: repoSlug)
+            try Self.runPullRequestRefresh(sessionNames: [session.name])
+        }.value
+
+        await refresh()
+    }
+
+    func runReap(dryRun: Bool) async throws -> String {
+        let output = try await Task.detached(priority: .userInitiated) {
+            try Self.runReap(dryRun: dryRun)
+        }.value
+
+        if !dryRun {
+            await refresh()
+        }
+
+        return Self.combinedOutput(from: output)
+    }
+
+    func runProd(for session: SessionInfo) async throws -> String {
+        let output = try await Task.detached(priority: .userInitiated) {
+            try Self.runProd(sessionName: session.name)
+        }.value
+
+        await refresh()
+
+        return Self.combinedOutput(from: output)
     }
 
     nonisolated private static func resolveGitRepoName(at path: String) -> String? {
@@ -244,6 +407,7 @@ final class SessionManager: ObservableObject {
             workingDirectory: session.workingDirectory,
             metadata: session.metadata,
             canonicalRepoRoot: session.canonicalRepoRoot,
+            githubRepoSlug: session.githubRepoSlug,
             tmuxActivityAt: session.tmuxActivityAt
         )
 
@@ -385,18 +549,73 @@ final class SessionManager: ObservableObject {
         throw CommandRunnerError.executionFailed("Failed to create a unique tmux session name for \(directory).")
     }
 
+    nonisolated private static func createSession(
+        using request: SessionCreationRequest,
+        resolvedRepoPath: String
+    ) throws -> String {
+        let baseName = try baseSessionName(for: request, repoPath: resolvedRepoPath)
+        let existingNames = try currentTmuxSessionNames()
+        let candidateName = uniqueSessionName(base: baseName, existing: existingNames)
+
+        var arguments = ["tp", "new", candidateName, "--profile", request.profile.rawValue]
+        if request.isBossSession {
+            arguments += ["-c", resolvedRepoPath]
+        } else {
+            arguments += ["--repo", resolvedRepoPath]
+        }
+
+        if let issueNumber = request.issueNumber {
+            arguments += ["--issue", String(issueNumber)]
+        }
+
+        if let description = request.description?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !description.isEmpty {
+            arguments += ["-d", description]
+        }
+
+        let output = try CommandRunner.runExpectingSuccess(
+            executable: "/usr/bin/env",
+            arguments: arguments
+        )
+
+        return createdSessionName(from: output.stdout) ?? candidateName
+    }
+
+    nonisolated private static func baseSessionName(
+        for request: SessionCreationRequest,
+        repoPath: String
+    ) throws -> String {
+        if request.isBossSession {
+            let repoName = URL(fileURLWithPath: repoPath).lastPathComponent
+            let bossName = sanitizeSessionName("\(repoName)-boss", lowercased: true)
+            guard !bossName.isEmpty else {
+                throw CommandRunnerError.executionFailed("Could not infer a boss session name from \(repoPath).")
+            }
+            return bossName
+        }
+
+        if let description = request.description?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !description.isEmpty {
+            let sanitized = sanitizeSessionName(description, lowercased: true)
+            guard !sanitized.isEmpty else {
+                throw CommandRunnerError.executionFailed("Could not infer a session name from the task description.")
+            }
+            return sanitized
+        }
+
+        if let issueNumber = request.issueNumber {
+            return "issue-\(issueNumber)"
+        }
+
+        throw CommandRunnerError.executionFailed("Provide an issue number or task description.")
+    }
+
     nonisolated private static func inferSessionName(for directory: String) throws -> String {
         let resolvedDirectory = URL(fileURLWithPath: directory).standardizedFileURL.path
         let canonicalRepoRoot = resolveCanonicalRepoRoot(at: resolvedDirectory)
         let sourcePath = canonicalRepoRoot ?? resolvedDirectory
         let rawName = URL(fileURLWithPath: sourcePath).lastPathComponent
-        let sanitized = rawName
-            .replacingOccurrences(
-                of: #"[^A-Za-z0-9._-]+"#,
-                with: "-",
-                options: .regularExpression
-            )
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let sanitized = sanitizeSessionName(rawName)
 
         guard !sanitized.isEmpty else {
             throw CommandRunnerError.executionFailed("Could not infer a session name from \(directory).")
@@ -416,6 +635,26 @@ final class SessionManager: ObservableObject {
         }
 
         return "\(base)-\(suffix)"
+    }
+
+    nonisolated private static func sanitizeSessionName(
+        _ rawName: String,
+        lowercased: Bool = false
+    ) -> String {
+        let source = lowercased ? rawName.lowercased() : rawName
+        let sanitized = source
+            .replacingOccurrences(
+                of: lowercased ? #"[^a-z0-9._-]+"# : #"[^A-Za-z0-9._-]+"#,
+                with: "-",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+
+        guard sanitized.count > 48 else {
+            return sanitized
+        }
+
+        return String(sanitized.prefix(48)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
     nonisolated private static func currentTmuxSessionNames() throws -> Set<String> {
@@ -467,6 +706,8 @@ final class SessionManager: ObservableObject {
             let dir = decoded[i].workingDirectory
                 .replacingOccurrences(of: "~", with: NSHomeDirectory())
             decoded[i].canonicalRepoRoot = Self.resolveCanonicalRepoRoot(at: dir)
+            let repoPath = decoded[i].canonicalRepoRoot ?? dir
+            decoded[i].githubRepoSlug = Self.resolveGitHubRepoSlug(at: repoPath)
 
             if decoded[i].metadata.repo == nil || decoded[i].metadata.repo?.isEmpty == true {
                 if let repoRoot = decoded[i].canonicalRepoRoot {
@@ -478,6 +719,138 @@ final class SessionManager: ObservableObject {
         }
 
         return decoded.sorted(by: SessionInfo.sort)
+    }
+
+    nonisolated private static func runPullRequestRefresh(sessionNames: [String]?) throws {
+        let names = sessionNames?
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        _ = try CommandRunner.runExpectingSuccess(
+            executable: "/usr/bin/env",
+            arguments: ["tp", "refresh"] + (names ?? [])
+        )
+    }
+
+    nonisolated private static func runReap(dryRun: Bool) throws -> CommandOutput {
+        try CommandRunner.runExpectingSuccess(
+            executable: "/usr/bin/env",
+            arguments: reapCommandArguments(dryRun: dryRun)
+        )
+    }
+
+    nonisolated private static func runProd(sessionName: String) throws -> CommandOutput {
+        let output = try CommandRunner.run(
+            executable: "/usr/bin/env",
+            arguments: prodCommandArguments(sessionName: sessionName)
+        )
+
+        if output.exitCode == 0 {
+            return output
+        }
+
+        if isUnknownSubcommandError(output: output, command: "prod") {
+            throw CommandRunnerError.executionFailed(
+                "The installed tp does not support `tp prod` yet. Upgrade tmux-pilot to a version that includes the prod command."
+            )
+        }
+
+        let stderr = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        throw CommandRunnerError.executionFailed(
+            stderr.isEmpty ? "tp prod failed." : stderr
+        )
+    }
+
+    nonisolated private static func mergePullRequest(number: String, repoSlug: String) throws {
+        do {
+            try runGitHubPullRequestMerge(number: number, repoSlug: repoSlug, strategy: nil)
+        } catch let error as CommandRunnerError {
+            guard errorRequiresExplicitMergeStrategy(error) else {
+                throw error
+            }
+
+            guard let strategy = try preferredMergeStrategy(for: repoSlug) else {
+                throw CommandRunnerError.executionFailed(
+                    "GitHub requires an explicit merge strategy for this repository, but SwiftMux could not determine whether merge, squash, or rebase is allowed."
+                )
+            }
+
+            try runGitHubPullRequestMerge(number: number, repoSlug: repoSlug, strategy: strategy)
+        }
+    }
+
+    nonisolated private static func runGitHubPullRequestMerge(
+        number: String,
+        repoSlug: String,
+        strategy: PullRequestMergeStrategy?
+    ) throws {
+        var arguments = ["gh", "pr", "merge", number, "--repo", repoSlug, "--auto"]
+        if let strategy {
+            arguments.append(strategy.flag)
+        }
+
+        _ = try CommandRunner.runExpectingSuccess(
+            executable: "/usr/bin/env",
+            arguments: arguments
+        )
+    }
+
+    nonisolated private static func preferredMergeStrategy(for repoSlug: String) throws -> PullRequestMergeStrategy? {
+        let output = try CommandRunner.runExpectingSuccess(
+            executable: "/usr/bin/env",
+            arguments: [
+                "gh", "repo", "view", repoSlug,
+                "--json", "viewerDefaultMergeMethod,mergeCommitAllowed,rebaseMergeAllowed,squashMergeAllowed"
+            ]
+        )
+
+        let data = Data(output.stdout.utf8)
+        let decoder = JSONDecoder()
+        let configuration = try decoder.decode(RepoMergeConfiguration.self, from: data)
+        return configuration.preferredStrategy
+    }
+
+    nonisolated private static func errorRequiresExplicitMergeStrategy(_ error: CommandRunnerError) -> Bool {
+        guard case .executionFailed(let message) = error else {
+            return false
+        }
+
+        let lowered = message.lowercased()
+        return lowered.contains("--merge")
+            && lowered.contains("--rebase")
+            && lowered.contains("--squash")
+            && lowered.contains("required")
+    }
+
+    nonisolated private static func reapCommandArguments(dryRun: Bool) -> [String] {
+        var arguments = ["tp", "reap"]
+        if dryRun {
+            arguments.append("--dry-run")
+        } else {
+            arguments.append("--force")
+        }
+        return arguments
+    }
+
+    nonisolated private static func prodCommandArguments(sessionName: String) -> [String] {
+        var arguments = ["tp", "prod"]
+        arguments.append(sessionName)
+        return arguments
+    }
+
+    nonisolated private static func isUnknownSubcommandError(output: CommandOutput, command: String) -> Bool {
+        let stderr = output.stderr.lowercased()
+        return stderr.contains("invalid choice: '\(command)'")
+            || stderr.contains("invalid choice: “\(command)”")
+            || stderr.contains("unknown command")
+    }
+
+    nonisolated private static func combinedOutput(from output: CommandOutput) -> String {
+        let stdout = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stderr = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        return [stdout, stderr]
+            .filter { !$0.isEmpty }
+            .joined(separator: stdout.isEmpty || stderr.isEmpty ? "" : "\n\n")
     }
 
     nonisolated private static func loadTmuxSessionActivity() throws -> [String: Date] {
@@ -544,5 +917,60 @@ final class SessionManager: ObservableObject {
         let topLevel = topLevelResult?.stdout
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return topLevel.isEmpty ? nil : topLevel
+    }
+
+    nonisolated private static func resolveGitHubRepoSlug(at path: String) -> String? {
+        guard FileManager.default.fileExists(atPath: path) else {
+            return nil
+        }
+
+        let result = try? CommandRunner.run(
+            executable: "/usr/bin/git",
+            arguments: ["-C", path, "remote", "get-url", "origin"]
+        )
+        guard result?.exitCode == 0 else {
+            return nil
+        }
+
+        let remoteURL = result?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return parseGitHubRepoSlug(from: remoteURL)
+    }
+
+    nonisolated private static func parseGitHubRepoSlug(from remoteURL: String) -> String? {
+        let trimmed = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        let prefixes = [
+            "https://github.com/",
+            "http://github.com/",
+            "ssh://git@github.com/",
+            "git@github.com:",
+            "github.com/"
+        ]
+
+        for prefix in prefixes where trimmed.hasPrefix(prefix) {
+            return normalizeGitHubRepoSlug(String(trimmed.dropFirst(prefix.count)))
+        }
+
+        if let range = trimmed.range(of: "github.com/") {
+            return normalizeGitHubRepoSlug(String(trimmed[range.upperBound...]))
+        }
+
+        return nil
+    }
+
+    nonisolated private static func normalizeGitHubRepoSlug(_ value: String) -> String? {
+        let cleaned = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ".git", with: "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let parts = cleaned.split(separator: "/").map(String.init)
+        guard parts.count >= 2 else {
+            return nil
+        }
+
+        return "\(parts[0])/\(parts[1])"
     }
 }
