@@ -28,6 +28,13 @@ final class TmuxTerminalState: ObservableObject {
         lastError = nil
     }
 
+    func prepareSwitch(to sessionName: String) {
+        currentDirectory = nil
+        terminalTitle = "SwiftMux"
+        statusMessage = "Switching to \(sessionName)"
+        lastError = nil
+    }
+
     func markSwitched(to sessionName: String) {
         connectedSessionName = sessionName
         statusMessage = "Attached to \(sessionName)"
