@@ -30,8 +30,15 @@ SwiftMux treats tmux sessions as the primary navigation object — not repos, no
 ## Requirements
 
 - macOS 14+
+- Swift 6.1+ (`.swift-version` pins the local dev toolchain)
 - tmux
 - tmux-pilot (`tp` CLI) — `pipx install tmux-pilot`
+
+## Development
+
+Use `just dev-run` from a worktree to build and open `SwiftMux Dev.app`. It has a separate bundle identifier from `SwiftMux.app`, so macOS can run it side by side with a pinned or installed main app without redirecting launch requests to the other checkout.
+
+Only one remote-control server can bind to a given port. If two app instances are running, start one server on the default `8421` and set the other to another port in the Remote Control sheet.
 
 ## Dependencies
 
@@ -41,6 +48,8 @@ SwiftMux treats tmux sessions as the primary navigation object — not repos, no
 ## Remote Access
 
 `SwiftMuxServer` exposes session metadata and a browser terminal attached to tmux through a PTY-backed WebSocket.
+
+From the macOS app, open **Tools > Remote Control…** or the toolbar Remote button to start and stop the server, scan a QR code from a phone, open the browser client, or copy the URL for another device.
 
 ```bash
 # Local only, no auth (default)

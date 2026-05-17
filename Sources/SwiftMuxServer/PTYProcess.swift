@@ -4,7 +4,15 @@ import Foundation
 
 /// A child process attached to a pseudoterminal. Output bytes flow through
 /// `outputStream`; write input via `write(_:)`; resize the pty with `resize`.
-final class PTYProcess: @unchecked Sendable {
+protocol TerminalBackend: AnyObject, Sendable {
+    var outputStream: AsyncStream<Data> { get }
+
+    func write(_ data: Data)
+    func resize(rows: UInt16, cols: UInt16)
+    func terminate()
+}
+
+final class PTYProcess: TerminalBackend, @unchecked Sendable {
     let outputStream: AsyncStream<Data>
 
     private let masterFD: Int32

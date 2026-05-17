@@ -4,7 +4,9 @@ import SwiftUI
 struct RootView: View {
     @StateObject private var sessionManager = SessionManager()
     @StateObject private var terminalState = TmuxTerminalState()
+    @StateObject private var remoteServerManager = RemoteServerManager()
     @State private var commandPalettePresented = false
+    @State private var remoteControlPresented = false
     @State private var newSessionSheetPresented = false
     @State private var newSessionRepositoryPath = ""
     @State private var newSessionProfile: SessionCreationProfile?
@@ -100,6 +102,13 @@ struct RootView: View {
                     Label("Command Palette", systemImage: "magnifyingglass")
                 }
                 .help("Jump to a tmux session with fuzzy search")
+
+                Button {
+                    remoteControlPresented = true
+                } label: {
+                    Label(remoteServerManager.isRunning ? "Remote On" : "Remote", systemImage: "network")
+                }
+                .help("Start or stop the SwiftMux web server")
             }
         }
         .sheet(isPresented: $commandPalettePresented) {
@@ -149,6 +158,9 @@ struct RootView: View {
         .sheet(item: $toolPreview) { preview in
             ToolCommandPreviewSheet(preview: preview)
         }
+        .sheet(isPresented: $remoteControlPresented) {
+            RemoteControlSheetView(serverManager: remoteServerManager)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxOpenCommandPalette)) { _ in
             commandPalettePresented = true
         }
@@ -174,6 +186,9 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxRunReap)) { notification in
             let dryRun = notification.userInfo?["dryRun"] as? Bool ?? false
             runReapCommand(dryRun: dryRun)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxShowRemoteControl)) { _ in
+            remoteControlPresented = true
         }
         .task {
             sessionManager.startPolling()

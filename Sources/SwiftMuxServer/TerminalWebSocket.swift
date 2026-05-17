@@ -22,9 +22,9 @@ enum TerminalWebSocket {
             let name = context.requestContext.parameters.get("name") ?? ""
             guard !name.isEmpty else { return }
 
-            let pty: PTYProcess
+            let terminal: TerminalBackend
             do {
-                pty = try PTYProcess(
+                terminal = try PTYProcess(
                     executable: "/usr/bin/env",
                     arguments: ["tmux", "attach", "-t", name],
                     rows: 40,
@@ -32,13 +32,17 @@ enum TerminalWebSocket {
                     environment: CommandRunner.mergedEnvironment(with: ["TERM": "xterm-256color"])
                 )
             } catch {
-                try? await outbound.write(.text("error: failed to attach: \(error)"))
-                return
+                do {
+                    terminal = try TmuxCaptureBridge(sessionName: name)
+                } catch {
+                    try? await outbound.write(.text("error: failed to attach: \(error)"))
+                    return
+                }
             }
 
             // Forward PTY output to WebSocket as binary frames.
             let outputTask = Task {
-                for await chunk in pty.outputStream {
+                for await chunk in terminal.outputStream {
                     var buffer = ByteBuffer()
                     buffer.writeBytes(chunk)
                     try? await outbound.write(.binary(buffer))
@@ -52,12 +56,12 @@ enum TerminalWebSocket {
                     case .text(let text):
                         if let data = text.data(using: .utf8),
                            let control = try? JSONDecoder().decode(ControlMessage.self, from: data) {
-                            handleControl(control, on: pty)
+                            handleControl(control, on: terminal)
                         }
                     case .binary(let buffer):
                         var buf = buffer
                         if let bytes = buf.readBytes(length: buf.readableBytes) {
-                            pty.write(Data(bytes))
+                            terminal.write(Data(bytes))
                         }
                     }
                 }
@@ -66,15 +70,15 @@ enum TerminalWebSocket {
             }
 
             outputTask.cancel()
-            pty.terminate()
+            terminal.terminate()
         }
     }
 
-    private static func handleControl(_ msg: ControlMessage, on pty: PTYProcess) {
+    private static func handleControl(_ msg: ControlMessage, on terminal: TerminalBackend) {
         switch msg.type {
         case "resize":
             if let rows = msg.rows, let cols = msg.cols, rows > 0, cols > 0 {
-                pty.resize(rows: rows, cols: cols)
+                terminal.resize(rows: rows, cols: cols)
             }
         default:
             break

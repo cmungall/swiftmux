@@ -2,8 +2,10 @@ import Foundation
 import Hummingbird
 import HummingbirdWebSocket
 
-/// Rejects requests whose Authorization header doesn't carry the configured bearer token.
-/// Healthz is exempted so external monitors can probe without credentials.
+/// Rejects control requests whose Authorization header doesn't carry the configured bearer token.
+/// The static web app shell is public because browsers cannot attach Authorization
+/// headers to ordinary stylesheet/script/manifest requests. API and WebSocket routes
+/// still require the bearer token.
 struct BearerTokenMiddleware: RouterMiddleware {
     typealias Context = BasicWebSocketRequestContext
 
@@ -14,7 +16,7 @@ struct BearerTokenMiddleware: RouterMiddleware {
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
-        if request.uri.path == "/healthz" {
+        if !requiresAuthentication(path: request.uri.path) {
             return try await next(request, context)
         }
 
@@ -29,5 +31,12 @@ struct BearerTokenMiddleware: RouterMiddleware {
         }
 
         return try await next(request, context)
+    }
+
+    private func requiresAuthentication(path: String) -> Bool {
+        path == "/api" ||
+            path.hasPrefix("/api/") ||
+            path == "/ws" ||
+            path.hasPrefix("/ws/")
     }
 }

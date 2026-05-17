@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
 SwiftMux.app/
+SwiftMux Dev.app/
 *.xcodeproj
 xcuserdata/
 DerivedData/
