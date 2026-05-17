@@ -10,6 +10,7 @@ extension Notification.Name {
     static let swiftMuxRefreshSessions = Notification.Name("swiftmux.refresh-sessions")
     static let swiftMuxRefreshPullRequests = Notification.Name("swiftmux.refresh-pull-requests")
     static let swiftMuxRunReap = Notification.Name("swiftmux.run-reap")
+    static let swiftMuxShowRemoteControl = Notification.Name("swiftmux.show-remote-control")
 }
 
 struct AppCommands: Commands {
@@ -52,6 +53,12 @@ struct AppCommands: Commands {
         }
 
         CommandMenu("Tools") {
+            Button("Remote Control…") {
+                NotificationCenter.default.post(name: .swiftMuxShowRemoteControl, object: nil)
+            }
+
+            Divider()
+
             Button("Refresh PR Metadata") {
                 NotificationCenter.default.post(name: .swiftMuxRefreshPullRequests, object: nil)
             }

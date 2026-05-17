@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'swiftmux-shell-v1';
+const CACHE = 'swiftmux-shell-v4';
 const SHELL_ASSETS = [
     '/',
     '/index.html',
@@ -9,9 +9,9 @@ const SHELL_ASSETS = [
     '/manifest.webmanifest',
     '/icons/icon-192.png',
     '/icons/icon-512.png',
-    'https://cdn.jsdelivr.net/npm/xterm@5.5.0/lib/xterm.min.js',
-    'https://cdn.jsdelivr.net/npm/xterm@5.5.0/css/xterm.min.css',
-    'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.min.js',
+    'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js',
+    'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css',
+    'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js',
 ];
 
 self.addEventListener('install', (event) => {

@@ -100,6 +100,56 @@ public struct SessionInfo: Identifiable, Codable, Hashable, Sendable {
         case process
         case workingDirectory = "working_dir"
         case metadata
+        case canonicalRepoRoot = "canonical_repo_root"
+        case githubRepoSlug = "github_repo_slug"
+        case tmuxActivityAt = "tmux_activity_at"
+    }
+
+    public init(
+        name: String,
+        process: String,
+        workingDirectory: String,
+        metadata: Metadata,
+        canonicalRepoRoot: String? = nil,
+        githubRepoSlug: String? = nil,
+        tmuxActivityAt: Date? = nil
+    ) {
+        self.name = name
+        self.process = process
+        self.workingDirectory = workingDirectory
+        self.metadata = metadata
+        self.canonicalRepoRoot = canonicalRepoRoot
+        self.githubRepoSlug = githubRepoSlug
+        self.tmuxActivityAt = tmuxActivityAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        process = try container.decode(String.self, forKey: .process)
+        workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
+        metadata = try container.decode(Metadata.self, forKey: .metadata)
+        canonicalRepoRoot = try container.decodeIfPresent(String.self, forKey: .canonicalRepoRoot)
+        githubRepoSlug = try container.decodeIfPresent(String.self, forKey: .githubRepoSlug)
+
+        if let timestamp = try container.decodeIfPresent(String.self, forKey: .tmuxActivityAt) {
+            tmuxActivityAt = Self.parseISO8601Timestamp(timestamp)
+        } else {
+            tmuxActivityAt = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(process, forKey: .process)
+        try container.encode(workingDirectory, forKey: .workingDirectory)
+        try container.encode(metadata, forKey: .metadata)
+        try container.encodeIfPresent(canonicalRepoRoot, forKey: .canonicalRepoRoot)
+        try container.encodeIfPresent(githubRepoSlug, forKey: .githubRepoSlug)
+        if let tmuxActivityAt {
+            try container.encode(Self.iso8601String(from: tmuxActivityAt), forKey: .tmuxActivityAt)
+        }
     }
 
     public var id: String { name }
@@ -393,6 +443,12 @@ public struct SessionInfo: Identifiable, Codable, Hashable, Sendable {
         return iso8601Formatters.lazy.compactMap { formatter in
             formatter.date(from: timestamp)
         }.first
+    }
+
+    private static func iso8601String(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 }
 

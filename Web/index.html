@@ -9,7 +9,7 @@
     <title>SwiftMux</title>
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/icons/icon-192.png">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.5.0/css/xterm.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -20,6 +20,16 @@
                 <button id="refresh-button" title="Refresh" aria-label="Refresh">↻</button>
             </div>
             <input id="search" type="search" placeholder="Search sessions…" autocomplete="off">
+            <div id="sidebar-controls">
+                <div class="segmented-control" role="tablist" aria-label="Session view">
+                    <button class="selected" data-view-mode="recent" role="tab" aria-selected="true">Recent</button>
+                    <button data-view-mode="repo" role="tab" aria-selected="false">By Repo</button>
+                </div>
+                <div class="segmented-control compact" role="group" aria-label="Session order">
+                    <button class="selected" data-order-mode="activity">Activity</button>
+                    <button data-order-mode="default">Default</button>
+                </div>
+            </div>
             <div id="session-list" role="list"></div>
             <div id="sidebar-footer">
                 <span id="status-indicator">connecting…</span>
@@ -29,7 +39,13 @@
         <main id="main">
             <header id="topbar">
                 <button id="sidebar-toggle" aria-label="Toggle sidebar">☰</button>
-                <span id="session-title">No session</span>
+                <div id="session-summary">
+                    <div id="session-title-row">
+                        <span id="session-title">No session</span>
+                        <div id="topbar-chips" aria-label="Session metadata"></div>
+                    </div>
+                    <div id="session-path"></div>
+                </div>
                 <button id="reconnect-button" title="Reconnect" aria-label="Reconnect">⟳</button>
             </header>
             <div id="terminal-container">
@@ -55,8 +71,8 @@
         </main>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.5.0/lib/xterm.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
     <script src="/app.js"></script>
 </body>
 </html>
