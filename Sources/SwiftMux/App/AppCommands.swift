@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftUI
 
 extension Notification.Name {
@@ -11,10 +12,18 @@ extension Notification.Name {
     static let swiftMuxRefreshPullRequests = Notification.Name("swiftmux.refresh-pull-requests")
     static let swiftMuxRunReap = Notification.Name("swiftmux.run-reap")
     static let swiftMuxShowRemoteControl = Notification.Name("swiftmux.show-remote-control")
+    static let swiftMuxShowDiagnostics = Notification.Name("swiftmux.show-diagnostics")
+    static let swiftMuxDetachStaleTerminalClients = Notification.Name("swiftmux.detach-stale-terminal-clients")
 }
 
 struct AppCommands: Commands {
     var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About SwiftMux") {
+                SwiftMuxAboutPanel.show()
+            }
+        }
+
         CommandGroup(replacing: .newItem) {
             Button("New Session…") {
                 NotificationCenter.default.post(name: .swiftMuxOpenNewSession, object: nil)
@@ -73,6 +82,16 @@ struct AppCommands: Commands {
             Button("tp reap --dry-run") {
                 postReap(dryRun: true)
             }
+
+            Divider()
+
+            Button("Diagnostics…") {
+                NotificationCenter.default.post(name: .swiftMuxShowDiagnostics, object: nil)
+            }
+
+            Button("Detach Stale Terminal Clients") {
+                NotificationCenter.default.post(name: .swiftMuxDetachStaleTerminalClients, object: nil)
+            }
         }
 
         CommandGroup(after: .help) {
@@ -104,6 +123,53 @@ struct AppCommands: Commands {
             name: .swiftMuxRunReap,
             object: nil,
             userInfo: ["dryRun": dryRun]
+        )
+    }
+}
+
+@MainActor
+private enum SwiftMuxAboutPanel {
+    static func show() {
+        let version = bundleValue("CFBundleShortVersionString") ?? "dev"
+        let commit = bundleValue("SwiftMuxGitCommit") ?? "unknown"
+        let dirty = bundleValue("SwiftMuxGitDirty") == "true"
+        let branch = bundleValue("SwiftMuxGitBranch")
+
+        let commitLabel = dirty ? "\(commit)-dirty" : commit
+        let credits = aboutCredits(commit: commitLabel, branch: branch)
+
+        NSApplication.shared.orderFrontStandardAboutPanel(options: [
+            .applicationName: "SwiftMux",
+            .applicationVersion: version,
+            .version: "commit \(commitLabel)",
+            .credits: credits
+        ])
+    }
+
+    private static func bundleValue(_ key: String) -> String? {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private static func aboutCredits(commit: String, branch: String?) -> NSAttributedString {
+        var lines = ["Commit \(commit)"]
+        if let branch, !branch.isEmpty {
+            lines.append("Branch \(branch)")
+        }
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+
+        return NSAttributedString(
+            string: lines.joined(separator: "\n"),
+            attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: paragraphStyle
+            ]
         )
     }
 }

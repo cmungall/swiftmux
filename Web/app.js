@@ -506,6 +506,9 @@ function ensureTerminal() {
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
+    if (window.WebLinksAddon) {
+        term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    }
     term.open(terminalEl);
     fit.fit();
     state.term = term;

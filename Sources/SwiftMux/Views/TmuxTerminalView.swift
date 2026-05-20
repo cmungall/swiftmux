@@ -10,9 +10,15 @@ struct TmuxTerminalView: NSViewRepresentable {
         Coordinator(terminalState: terminalState)
     }
 
-    func makeNSView(context: Context) -> LocalProcessTerminalView {
-        let view = LocalProcessTerminalView(frame: .zero)
+    func makeNSView(context: Context) -> SwiftMuxTerminalView {
+        let view = SwiftMuxTerminalView(frame: .zero)
+        let coordinator = context.coordinator
         view.processDelegate = context.coordinator
+        view.openErrorHandler = { [weak coordinator] message in
+            Task { @MainActor in
+                coordinator?.reportOpenError(message)
+            }
+        }
         view.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         view.nativeBackgroundColor = NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1.0)
         view.nativeForegroundColor = NSColor(calibratedRed: 0.88, green: 0.91, blue: 0.94, alpha: 1.0)
@@ -23,12 +29,14 @@ struct TmuxTerminalView: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
+    func updateNSView(_ nsView: SwiftMuxTerminalView, context: Context) {
+        nsView.currentWorkingDirectory = terminalState.currentDirectory
+        nsView.sessionWorkingDirectory = session?.resolvedWorkingDirectory
         context.coordinator.bind(nsView)
         context.coordinator.ensureAttached(to: session)
     }
 
-    static func dismantleNSView(_ nsView: LocalProcessTerminalView, coordinator: Coordinator) {
+    static func dismantleNSView(_ nsView: SwiftMuxTerminalView, coordinator: Coordinator) {
         coordinator.teardown()
     }
 
@@ -42,9 +50,8 @@ struct TmuxTerminalView: NSViewRepresentable {
         private var ttyPollingTask: Task<Void, Never>?
         private var switchTask: Task<Void, Never>?
         private var lastRequestedSessionName: String?
-        private var scrollMonitor: Any?
-        private var preciseScrollAccumulator: CGFloat = 0
-        private var lastPreciseScrollDirection = 0
+        private var eventMonitor: Any?
+        private var suppressMouseUntilUp = false
 
         init(terminalState: TmuxTerminalState) {
             self.terminalState = terminalState
@@ -52,21 +59,25 @@ struct TmuxTerminalView: NSViewRepresentable {
 
         func bind(_ terminalView: LocalProcessTerminalView) {
             self.terminalView = terminalView
-            installScrollMonitorIfNeeded()
+            installEventMonitorIfNeeded()
         }
 
         func teardown() {
             ttyPollingTask?.cancel()
             switchTask?.cancel()
-            resetPreciseScrollState()
-            if let scrollMonitor {
-                NSEvent.removeMonitor(scrollMonitor)
-                self.scrollMonitor = nil
+            detachActiveTmuxClient()
+            if let eventMonitor {
+                NSEvent.removeMonitor(eventMonitor)
+                self.eventMonitor = nil
             }
 
             if let ttyHandshakeURL {
                 try? FileManager.default.removeItem(at: ttyHandshakeURL)
             }
+        }
+
+        func reportOpenError(_ message: String) {
+            terminalState.reportError(message)
         }
 
         func ensureAttached(to session: SessionInfo?) {
@@ -201,140 +212,71 @@ struct TmuxTerminalView: NSViewRepresentable {
             "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
         }
 
-        private func installScrollMonitorIfNeeded() {
-            guard scrollMonitor == nil else {
+        private func detachActiveTmuxClient() {
+            let discoveredTTY = activeTTY ?? ttyHandshakeURL.flatMap {
+                try? String(contentsOf: $0, encoding: .utf8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            guard let discoveredTTY, !discoveredTTY.isEmpty else {
                 return
             }
 
-            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                guard let self, self.handleScrollWheel(event) else {
-                    return event
-                }
-
-                return nil
-            }
-        }
-
-        private func handleScrollWheel(_ event: NSEvent) -> Bool {
-            guard let terminalView else {
-                return false
-            }
-
-            let terminal = terminalView.getTerminal()
-            guard terminalView.allowMouseReporting, terminal.mouseMode != .off else {
-                return false
-            }
-
-            guard event.window === terminalView.window else {
-                return false
-            }
-
-            let point = terminalView.convert(event.locationInWindow, from: nil)
-            guard terminalView.bounds.contains(point) else {
-                return false
-            }
-
-            let scrollSteps = scrollSteps(for: event, in: terminalView, terminal: terminal)
-            guard scrollSteps != 0 else {
-                return event.hasPreciseScrollingDeltas || !event.momentumPhase.isEmpty
-            }
-
-            let hit = mouseHit(for: point, in: terminalView, terminal: terminal)
-            let modifiers = event.modifierFlags
-            let button = scrollSteps > 0 ? 4 : 5
-
-            for _ in 0..<abs(scrollSteps) {
-                let buttonFlags = terminal.encodeButton(
-                    button: button,
-                    release: false,
-                    shift: modifiers.contains(.shift),
-                    meta: modifiers.contains(.option),
-                    control: modifiers.contains(.control)
-                )
-
-                terminal.sendEvent(
-                    buttonFlags: buttonFlags,
-                    x: hit.grid.col,
-                    y: hit.grid.row,
-                    pixelX: hit.pixel.col,
-                    pixelY: hit.pixel.row
+            Task.detached(priority: .utility) {
+                _ = try? CommandRunner.run(
+                    executable: "/usr/bin/env",
+                    arguments: ["tmux", "detach-client", "-t", discoveredTTY]
                 )
             }
-            return true
         }
 
-        private func scrollSteps(
-            for event: NSEvent,
-            in terminalView: LocalProcessTerminalView,
-            terminal: Terminal
-        ) -> Int {
-            if !event.momentumPhase.isEmpty {
-                resetPreciseScrollState()
-                return 0
+        private func installEventMonitorIfNeeded() {
+            guard eventMonitor == nil else {
+                return
             }
 
-            let deltaY = event.scrollingDeltaY == 0 ? event.deltaY : event.scrollingDeltaY
-            guard deltaY != 0 else {
-                if !event.phase.isEmpty {
-                    resetPreciseScrollState()
+            eventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.scrollWheel, .leftMouseDown, .leftMouseDragged, .leftMouseUp]
+            ) { [weak self] event in
+                self?.handleTerminalEvent(event) ?? event
+            }
+        }
+
+        private func handleTerminalEvent(_ event: NSEvent) -> NSEvent? {
+            guard let terminalView = terminalView as? SwiftMuxTerminalView else {
+                return event
+            }
+
+            if suppressMouseUntilUp {
+                switch event.type {
+                case .leftMouseDragged:
+                    _ = terminalView.cancelPendingCommandClick()
+                    return nil
+                case .leftMouseUp:
+                    suppressMouseUntilUp = false
+                    _ = terminalView.completeCommandClick(with: event)
+                    return nil
+                default:
+                    break
                 }
-                return 0
             }
 
-            if !event.hasPreciseScrollingDeltas {
-                resetPreciseScrollState()
-                let steps = max(Int(abs(deltaY).rounded(.awayFromZero)), 1)
-                return deltaY > 0 ? steps : -steps
+            guard terminalView.containsEventLocation(event) else {
+                return event
             }
 
-            let direction = deltaY > 0 ? 1 : -1
-            if direction != lastPreciseScrollDirection {
-                preciseScrollAccumulator = 0
-                lastPreciseScrollDirection = direction
+            switch event.type {
+            case .scrollWheel:
+                return terminalView.handleScrollWheel(event) ? nil : event
+            case .leftMouseDown:
+                if terminalView.beginCommandClick(with: event) {
+                    suppressMouseUntilUp = true
+                    return nil
+                }
+                return event
+            default:
+                return event
             }
-
-            let rows = max(terminal.rows, 1)
-            let lineHeight = max(terminalView.bounds.height / CGFloat(rows), 1)
-            preciseScrollAccumulator += deltaY
-
-            let steps = Int(abs(preciseScrollAccumulator) / lineHeight)
-            if steps > 0 {
-                preciseScrollAccumulator -= CGFloat(direction * steps) * lineHeight
-            }
-
-            if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
-                resetPreciseScrollState()
-            }
-
-            return direction * steps
-        }
-
-        private func resetPreciseScrollState() {
-            preciseScrollAccumulator = 0
-            lastPreciseScrollDirection = 0
-        }
-
-        private func mouseHit(
-            for point: CGPoint,
-            in terminalView: LocalProcessTerminalView,
-            terminal: Terminal
-        ) -> (grid: Position, pixel: Position) {
-            let clampedX = min(max(point.x, 0), terminalView.bounds.width)
-            let clampedY = min(max(point.y, 0), terminalView.bounds.height)
-            let cols = max(terminal.cols, 1)
-            let rows = max(terminal.rows, 1)
-            let cellWidth = max(terminalView.bounds.width / CGFloat(cols), 1)
-            let cellHeight = max(terminalView.bounds.height / CGFloat(rows), 1)
-
-            let gridCol = min(max(Int(clampedX / cellWidth), 0), cols - 1)
-            let gridRow = min(max(Int((terminalView.bounds.height - clampedY) / cellHeight), 0), rows - 1)
-            let pixelCol = Int(clampedX)
-            let pixelRow = Int(terminalView.bounds.height - clampedY)
-
-            return (
-                grid: Position(col: gridCol, row: gridRow),
-                pixel: Position(col: pixelCol, row: pixelRow)
-            )
         }
 
         nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}

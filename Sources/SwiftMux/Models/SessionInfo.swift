@@ -523,24 +523,22 @@ struct SessionInfo: Identifiable, Codable, Hashable {
         return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
     }
 
-    private static let iso8601Formatters: [ISO8601DateFormatter] = {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-
-        return [fractional, plain]
-    }()
-
     private static func parseISO8601Timestamp(_ value: String?) -> Date? {
         guard let timestamp = value?.nonEmpty else {
             return nil
         }
 
-        return iso8601Formatters.lazy.compactMap { formatter in
-            formatter.date(from: timestamp)
-        }.first
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        if let date = fractional.date(from: timestamp) {
+            return date
+        }
+
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+
+        return plain.date(from: timestamp)
     }
 
     private static func displayLabel(forPullRequestState value: String?) -> String? {

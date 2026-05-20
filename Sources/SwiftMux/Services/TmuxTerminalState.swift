@@ -5,6 +5,7 @@ final class TmuxTerminalState: ObservableObject {
     @Published var resetToken = UUID()
     @Published private(set) var connectedSessionName: String?
     @Published private(set) var currentDirectory: String?
+    @Published private(set) var activeTTY: String?
     @Published private(set) var terminalTitle = "SwiftMux"
     @Published private(set) var statusMessage = "Select a tmux session"
     @Published private(set) var lastError: String?
@@ -12,6 +13,7 @@ final class TmuxTerminalState: ObservableObject {
     func prepareLaunch(for sessionName: String) -> URL {
         connectedSessionName = nil
         currentDirectory = nil
+        activeTTY = nil
         terminalTitle = "SwiftMux"
         statusMessage = "Attaching \(sessionName)"
         lastError = nil
@@ -24,6 +26,7 @@ final class TmuxTerminalState: ObservableObject {
 
     func markConnected(sessionName: String, tty: String) {
         connectedSessionName = sessionName
+        activeTTY = tty
         statusMessage = "Attached to \(sessionName) on \(tty)"
         lastError = nil
     }
@@ -53,6 +56,7 @@ final class TmuxTerminalState: ObservableObject {
 
     func markDetached(message: String) {
         connectedSessionName = nil
+        activeTTY = nil
         reportError(message)
     }
 

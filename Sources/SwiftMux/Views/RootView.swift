@@ -5,9 +5,7 @@ struct RootView: View {
     @StateObject private var sessionManager = SessionManager()
     @StateObject private var terminalState = TmuxTerminalState()
     @StateObject private var remoteServerManager = RemoteServerManager()
-    @State private var commandPalettePresented = false
-    @State private var remoteControlPresented = false
-    @State private var newSessionSheetPresented = false
+    @State private var activeSheet: RootSheet?
     @State private var newSessionRepositoryPath = ""
     @State private var newSessionProfile: SessionCreationProfile?
     @State private var newSessionTaskDescription = ""
@@ -17,9 +15,7 @@ struct RootView: View {
     @State private var newSessionInFlight = false
     @State private var alertTitle = "SwiftMux"
     @State private var alertMessage: String?
-    @State private var helpPresented = false
     @State private var helpTopic: SwiftMuxHelpTopic = .overview
-    @State private var toolPreview: ToolCommandPreview?
     @State private var toolCommandInFlight = false
 
     var body: some View {
@@ -97,48 +93,19 @@ struct RootView: View {
                 .help("Reload tmux sessions from tmux-pilot")
 
                 Button {
-                    commandPalettePresented = true
+                    activeSheet = .commandPalette
                 } label: {
                     Label("Command Palette", systemImage: "magnifyingglass")
                 }
                 .help("Jump to a tmux session with fuzzy search")
 
                 Button {
-                    remoteControlPresented = true
+                    activeSheet = .remoteControl
                 } label: {
                     Label(remoteServerManager.isRunning ? "Remote On" : "Remote", systemImage: "network")
                 }
                 .help("Start or stop the SwiftMux web server")
             }
-        }
-        .sheet(isPresented: $commandPalettePresented) {
-            CommandPaletteView(sessions: sessionManager.sessions) { session in
-                sessionManager.selectSession(session)
-            }
-        }
-        .sheet(isPresented: $newSessionSheetPresented) {
-            NewSessionSheetView(
-                repositoryPath: $newSessionRepositoryPath,
-                selectedProfile: $newSessionProfile,
-                taskDescription: $newSessionTaskDescription,
-                issueNumber: $newSessionIssueNumber,
-                isBossSession: $newSessionBossMode,
-                knownRepos: knownRepoTargets,
-                errorMessage: newSessionError,
-                isSubmitting: newSessionInFlight,
-                onChooseRepository: chooseSessionRepository,
-                onChooseKnownRepository: { target in
-                    newSessionRepositoryPath = target.path
-                },
-                onCancel: {
-                    guard !newSessionInFlight else {
-                        return
-                    }
-
-                    newSessionSheetPresented = false
-                },
-                onSubmit: submitNewSession
-            )
         }
         .alert(alertTitle, isPresented: alertPresented) {
             Button("OK", role: .cancel) {
@@ -147,22 +114,50 @@ struct RootView: View {
         } message: {
             Text(alertMessage ?? "")
         }
-        .sheet(isPresented: $helpPresented) {
-            SwiftMuxHelpSheet(
-                selectedTopic: $helpTopic,
-                onOpenPalette: { commandPalettePresented = true },
-                onFocusSidebarSearch: focusSidebarSearch,
-                onRefresh: refreshSessions
-            )
-        }
-        .sheet(item: $toolPreview) { preview in
-            ToolCommandPreviewSheet(preview: preview)
-        }
-        .sheet(isPresented: $remoteControlPresented) {
-            RemoteControlSheetView(serverManager: remoteServerManager)
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .commandPalette:
+                CommandPaletteView(sessions: sessionManager.sessions) { session in
+                    sessionManager.selectSession(session)
+                }
+            case .newSession:
+                NewSessionSheetView(
+                    repositoryPath: $newSessionRepositoryPath,
+                    selectedProfile: $newSessionProfile,
+                    taskDescription: $newSessionTaskDescription,
+                    issueNumber: $newSessionIssueNumber,
+                    isBossSession: $newSessionBossMode,
+                    knownRepos: knownRepoTargets,
+                    errorMessage: newSessionError,
+                    isSubmitting: newSessionInFlight,
+                    onChooseRepository: chooseSessionRepository,
+                    onChooseKnownRepository: { target in
+                        newSessionRepositoryPath = target.path
+                    },
+                    onCancel: {
+                        guard !newSessionInFlight else {
+                            return
+                        }
+
+                        activeSheet = nil
+                    },
+                    onSubmit: submitNewSession
+                )
+            case .help:
+                SwiftMuxHelpSheet(
+                    selectedTopic: $helpTopic,
+                    onOpenPalette: { activeSheet = .commandPalette },
+                    onFocusSidebarSearch: focusSidebarSearch,
+                    onRefresh: refreshSessions
+                )
+            case .toolPreview(let preview):
+                ToolCommandPreviewSheet(preview: preview)
+            case .remoteControl:
+                RemoteControlSheetView(serverManager: remoteServerManager)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxOpenCommandPalette)) { _ in
-            commandPalettePresented = true
+            activeSheet = .commandPalette
         }
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxOpenNewSession)) { _ in
             presentNewSessionSheet()
@@ -188,7 +183,13 @@ struct RootView: View {
             runReapCommand(dryRun: dryRun)
         }
         .onReceive(NotificationCenter.default.publisher(for: .swiftMuxShowRemoteControl)) { _ in
-            remoteControlPresented = true
+            activeSheet = .remoteControl
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxShowDiagnostics)) { _ in
+            showDiagnostics()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .swiftMuxDetachStaleTerminalClients)) { _ in
+            detachStaleTerminalClients()
         }
         .task {
             sessionManager.startPolling()
@@ -275,7 +276,7 @@ struct RootView: View {
         newSessionBossMode = false
         newSessionError = nil
         newSessionInFlight = false
-        newSessionSheetPresented = true
+        activeSheet = .newSession
     }
 
     private func submitNewSession() {
@@ -323,7 +324,7 @@ struct RootView: View {
                 )
                 await MainActor.run {
                     newSessionInFlight = false
-                    newSessionSheetPresented = false
+                    activeSheet = nil
                 }
             } catch {
                 await MainActor.run {
@@ -371,7 +372,7 @@ struct RootView: View {
 
     private func presentHelp(topic: SwiftMuxHelpTopic = .overview) {
         helpTopic = topic
-        helpPresented = true
+        activeSheet = .help
     }
 
     private func focusSidebarSearch() {
@@ -400,10 +401,10 @@ struct RootView: View {
                     toolCommandInFlight = false
 
                     if dryRun || !trimmedOutput.isEmpty {
-                        toolPreview = ToolCommandPreview(
+                        activeSheet = .toolPreview(ToolCommandPreview(
                             title: dryRun ? "tp reap --dry-run" : "tp reap",
                             output: trimmedOutput.isEmpty ? "No output returned." : trimmedOutput
-                        )
+                        ))
                     }
                 }
             } catch {
@@ -418,6 +419,52 @@ struct RootView: View {
         }
     }
 
+    private func showDiagnostics() {
+        activeSheet = .toolPreview(ToolCommandPreview(
+            title: "SwiftMux Diagnostics",
+            output: "Collecting diagnostics..."
+        ))
+
+        let selectedSession = sessionManager.selectedSession
+        let terminalSnapshot = TerminalDiagnosticsSnapshot(
+            selectedSessionName: selectedSession?.name,
+            connectedSessionName: terminalState.connectedSessionName,
+            activeTTY: terminalState.activeTTY,
+            currentDirectory: terminalState.currentDirectory,
+            statusMessage: terminalState.statusMessage,
+            lastError: terminalState.lastError
+        )
+
+        Task {
+            let report = await Task.detached(priority: .userInitiated) {
+                SwiftMuxDiagnostics.makeReport(snapshot: terminalSnapshot)
+            }.value
+
+            await MainActor.run {
+                activeSheet = .toolPreview(ToolCommandPreview(title: "SwiftMux Diagnostics", output: report))
+            }
+        }
+    }
+
+    private func detachStaleTerminalClients() {
+        activeSheet = .toolPreview(ToolCommandPreview(
+            title: "Detach Stale Terminal Clients",
+            output: "Checking tmux clients..."
+        ))
+
+        let currentTTY = terminalState.activeTTY
+
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                SwiftMuxDiagnostics.detachStaleTerminalClients(currentTTY: currentTTY)
+            }.value
+
+            await MainActor.run {
+                activeSheet = .toolPreview(ToolCommandPreview(title: "Detach Stale Terminal Clients", output: result))
+            }
+        }
+    }
+
     private func presentAlert(title: String, message: String) {
         alertTitle = title
         alertMessage = message
@@ -428,6 +475,29 @@ private struct ToolCommandPreview: Identifiable {
     let id = UUID()
     let title: String
     let output: String
+}
+
+private enum RootSheet: Identifiable {
+    case commandPalette
+    case newSession
+    case help
+    case toolPreview(ToolCommandPreview)
+    case remoteControl
+
+    var id: String {
+        switch self {
+        case .commandPalette:
+            return "command-palette"
+        case .newSession:
+            return "new-session"
+        case .help:
+            return "help"
+        case .toolPreview:
+            return "tool-preview"
+        case .remoteControl:
+            return "remote-control"
+        }
+    }
 }
 
 private struct SessionCreationTarget: Identifiable, Hashable {
@@ -1525,129 +1595,142 @@ private struct NewSessionSheetView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("New Session")
-                .font(.system(size: 17, weight: .bold, design: .rounded))
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("New Session")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
 
-            Text("Choose a repo, then create either a boss session in-place or a task session in a fresh worktree.")
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundColor(AppTheme.mutedText)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Repo")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundColor(AppTheme.mutedText)
-
-                HStack(spacing: 10) {
-                    TextField("Repo path", text: $repositoryPath)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .focused($focusedField, equals: .repository)
-                        .onSubmit {
-                            if !isCreateDisabled {
-                                onSubmit()
-                            }
-                        }
-
-                    Button("Choose…") {
-                        onChooseRepository()
-                    }
-                    .disabled(isSubmitting)
-                }
-            }
-
-            if !knownRepos.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Known Repos")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    Text("Choose a repo, then create either a boss session in-place or a task session in a fresh worktree.")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundColor(AppTheme.mutedText)
 
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(knownRepos) { target in
-                                Button(target.name) {
-                                    onChooseKnownRepository(target)
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .help(target.path)
-                            }
-                        }
-                    }
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Agent Profile")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundColor(AppTheme.mutedText)
-
-                Picker("Agent Profile", selection: $selectedProfile) {
-                    Text("Choose Profile").tag(SessionCreationProfile?.none)
-                    ForEach(SessionCreationProfile.allCases) { profile in
-                        Text(profile.title).tag(SessionCreationProfile?.some(profile))
-                    }
-                }
-                .pickerStyle(.menu)
-                .disabled(isSubmitting)
-
-                if let selectedProfile {
-                    Text(selectedProfile.commandSummary)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(AppTheme.mutedText)
-                }
-            }
-
-            Toggle("Boss session", isOn: $isBossSession)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-
-            if isBossSession {
-                Text("Boss sessions launch the selected profile in the selected checkout without creating a task worktree.")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundColor(AppTheme.mutedText)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Issue Number")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Repo")
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
                             .foregroundColor(AppTheme.mutedText)
 
-                        TextField("771", text: $issueNumber)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 13, weight: .medium, design: .monospaced))
-                            .focused($focusedField, equals: .issue)
+                        HStack(spacing: 10) {
+                            TextField("Repo path", text: $repositoryPath)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                .focused($focusedField, equals: .repository)
+                                .onSubmit {
+                                    if !isSubmitting {
+                                        onSubmit()
+                                    }
+                                }
+
+                            Button("Choose…") {
+                                onChooseRepository()
+                            }
+                            .disabled(isSubmitting)
+                        }
                     }
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Task Description")
+                    if !knownRepos.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Known Repos")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(AppTheme.mutedText)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(knownRepos) { target in
+                                        Button(target.name) {
+                                            onChooseKnownRepository(target)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                        .help(target.path)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Agent Profile")
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
                             .foregroundColor(AppTheme.mutedText)
 
-                        TextField("oauth cleanup, ci hardening, parser pass…", text: $taskDescription)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .focused($focusedField, equals: .task)
-                            .onSubmit {
-                                if !isCreateDisabled {
-                                    onSubmit()
-                                }
+                        Picker("Agent Profile", selection: $selectedProfile) {
+                            Text("Choose Profile").tag(SessionCreationProfile?.none)
+                            ForEach(SessionCreationProfile.allCases) { profile in
+                                Text(profile.title).tag(SessionCreationProfile?.some(profile))
                             }
+                        }
+                        .pickerStyle(.menu)
+                        .disabled(isSubmitting)
+
+                        if let selectedProfile {
+                            Text(selectedProfile.commandSummary)
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundColor(AppTheme.mutedText)
+                        }
                     }
 
-                    Text("Provide either an issue number or a task description. If you provide both, the description is used for the session name.")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundColor(AppTheme.mutedText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+                    Toggle("Boss session", isOn: $isBossSession)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
 
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundColor(.red.opacity(0.9))
-                    .textSelection(.enabled)
+                    if isBossSession {
+                        Text("Boss sessions launch the selected profile in the selected checkout without creating a task worktree.")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundColor(AppTheme.mutedText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        VStack(alignment: .leading, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Issue Number")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(AppTheme.mutedText)
+
+                                TextField("771", text: $issueNumber)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                    .focused($focusedField, equals: .issue)
+                            }
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Task Description")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(AppTheme.mutedText)
+
+                                TextField("oauth cleanup, ci hardening, parser pass…", text: $taskDescription)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                                    .focused($focusedField, equals: .task)
+                                    .onSubmit {
+                                        if !isSubmitting {
+                                            onSubmit()
+                                        }
+                                    }
+                            }
+
+                            Text("Provide either an issue number or a task description. If you provide both, the description is used for the session name.")
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
+                                .foregroundColor(AppTheme.mutedText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundColor(.red.opacity(0.9))
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(Color.red.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                .padding(20)
             }
+            .frame(maxHeight: 620)
+
+            Divider()
 
             HStack {
                 Spacer()
@@ -1658,14 +1741,24 @@ private struct NewSessionSheetView: View {
                 .keyboardShortcut(.cancelAction)
                 .disabled(isSubmitting)
 
-                Button("New") {
+                Button {
                     onSubmit()
+                } label: {
+                    if isSubmitting {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Creating")
+                        }
+                    } else {
+                        Text("New")
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(isCreateDisabled)
+                .disabled(isSubmitting)
             }
+            .padding(20)
         }
-        .padding(20)
         .frame(width: 560)
         .background(AppTheme.panelBackground)
         .onAppear {
@@ -1673,21 +1766,6 @@ private struct NewSessionSheetView: View {
         }
     }
 
-    private var isCreateDisabled: Bool {
-        if isSubmitting || trimmedRepositoryPath.isEmpty {
-            return true
-        }
-
-        if selectedProfile == nil {
-            return true
-        }
-
-        if isBossSession {
-            return false
-        }
-
-        return trimmedIssueNumber.isEmpty && trimmedTaskDescription.isEmpty
-    }
 }
 
 private struct MetadataLine: View {
