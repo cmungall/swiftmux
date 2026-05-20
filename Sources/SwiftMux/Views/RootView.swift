@@ -16,6 +16,7 @@ struct RootView: View {
     @State private var alertTitle = "SwiftMux"
     @State private var alertMessage: String?
     @State private var helpTopic: SwiftMuxHelpTopic = .overview
+    @State private var toolPreview: ToolCommandPreview?
     @State private var toolCommandInFlight = false
 
     var body: some View {
@@ -150,8 +151,10 @@ struct RootView: View {
                     onFocusSidebarSearch: focusSidebarSearch,
                     onRefresh: refreshSessions
                 )
-            case .toolPreview(let preview):
-                ToolCommandPreviewSheet(preview: preview)
+            case .toolPreview:
+                if let toolPreview {
+                    ToolCommandPreviewSheet(preview: toolPreview)
+                }
             case .remoteControl:
                 RemoteControlSheetView(serverManager: remoteServerManager)
             }
@@ -401,10 +404,11 @@ struct RootView: View {
                     toolCommandInFlight = false
 
                     if dryRun || !trimmedOutput.isEmpty {
-                        activeSheet = .toolPreview(ToolCommandPreview(
+                        toolPreview = ToolCommandPreview(
                             title: dryRun ? "tp reap --dry-run" : "tp reap",
                             output: trimmedOutput.isEmpty ? "No output returned." : trimmedOutput
-                        ))
+                        )
+                        activeSheet = .toolPreview
                     }
                 }
             } catch {
@@ -420,10 +424,11 @@ struct RootView: View {
     }
 
     private func showDiagnostics() {
-        activeSheet = .toolPreview(ToolCommandPreview(
+        toolPreview = ToolCommandPreview(
             title: "SwiftMux Diagnostics",
             output: "Collecting diagnostics..."
-        ))
+        )
+        activeSheet = .toolPreview
 
         let selectedSession = sessionManager.selectedSession
         let terminalSnapshot = TerminalDiagnosticsSnapshot(
@@ -441,16 +446,17 @@ struct RootView: View {
             }.value
 
             await MainActor.run {
-                activeSheet = .toolPreview(ToolCommandPreview(title: "SwiftMux Diagnostics", output: report))
+                toolPreview = ToolCommandPreview(title: "SwiftMux Diagnostics", output: report)
             }
         }
     }
 
     private func detachStaleTerminalClients() {
-        activeSheet = .toolPreview(ToolCommandPreview(
+        toolPreview = ToolCommandPreview(
             title: "Detach Stale Terminal Clients",
             output: "Checking tmux clients..."
-        ))
+        )
+        activeSheet = .toolPreview
 
         let currentTTY = terminalState.activeTTY
 
@@ -460,7 +466,7 @@ struct RootView: View {
             }.value
 
             await MainActor.run {
-                activeSheet = .toolPreview(ToolCommandPreview(title: "Detach Stale Terminal Clients", output: result))
+                toolPreview = ToolCommandPreview(title: "Detach Stale Terminal Clients", output: result)
             }
         }
     }
@@ -481,7 +487,7 @@ private enum RootSheet: Identifiable {
     case commandPalette
     case newSession
     case help
-    case toolPreview(ToolCommandPreview)
+    case toolPreview
     case remoteControl
 
     var id: String {
