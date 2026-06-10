@@ -10,8 +10,6 @@ struct RemoteControlSheetView: View {
     private var bindModeRaw = RemoteServerBindMode.local.rawValue
     @AppStorage("swiftmux.remote.port")
     private var port = 8421
-    @AppStorage("swiftmux.remote.require-token")
-    private var requireToken = false
     @AppStorage("swiftmux.remote.token")
     private var token = ""
 
@@ -23,11 +21,8 @@ struct RemoteControlSheetView: View {
         }
         nonmutating set {
             bindModeRaw = newValue.rawValue
-            if newValue == .network {
-                requireToken = true
-                if token.isEmpty {
-                    token = RemoteServerManager.generateToken()
-                }
+            if token.isEmpty {
+                token = RemoteServerManager.generateToken()
             }
         }
     }
@@ -81,43 +76,36 @@ struct RemoteControlSheetView: View {
                         .disabled(serverManager.isActive)
                 }
 
-                Toggle("Require bearer token", isOn: $requireToken)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .disabled(serverManager.isActive)
-                    .onChange(of: requireToken) { _, enabled in
-                        if enabled, token.isEmpty {
-                            token = RemoteServerManager.generateToken()
-                        }
-                    }
+                HStack(spacing: 10) {
+                    Text("Token")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundColor(AppTheme.mutedText)
+                        .frame(width: 86, alignment: .leading)
 
-                if requireToken {
-                    HStack(spacing: 10) {
-                        Text("Token")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundColor(AppTheme.mutedText)
-                            .frame(width: 86, alignment: .leading)
-
-                        TextField("Token", text: $token)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, weight: .medium, design: .monospaced))
-                            .disabled(serverManager.isActive)
-
-                        Button {
-                            token = RemoteServerManager.generateToken()
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .help("Regenerate token")
+                    TextField("Token", text: $token)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
                         .disabled(serverManager.isActive)
 
-                        Button {
-                            copy(token)
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                        }
-                        .help("Copy token")
+                    Button {
+                        token = RemoteServerManager.generateToken()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
                     }
+                    .help("Regenerate token")
+                    .disabled(serverManager.isActive)
+
+                    Button {
+                        copy(token)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .help("Copy token")
                 }
+
+                Text("A bearer token is always required. Anyone with this token can control your tmux sessions.")
+                    .font(.system(size: 10, weight: .regular, design: .rounded))
+                    .foregroundColor(AppTheme.mutedText)
             }
             .padding(14)
             .background(AppTheme.elevatedBackground)
@@ -222,7 +210,7 @@ struct RemoteControlSheetView: View {
     }
 
     private var isStartDisabled: Bool {
-        port < 1 || port > 65535 || (requireToken && token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        port < 1 || port > 65535 || token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var canScanFromPhone: Bool {
@@ -230,11 +218,10 @@ struct RemoteControlSheetView: View {
     }
 
     private func startServer() {
-        let activeToken = requireToken ? token : nil
         serverManager.start(
             bindMode: bindMode,
             port: port,
-            token: activeToken
+            token: token
         )
     }
 
