@@ -1118,6 +1118,8 @@ private struct SessionDetailView: View {
     @State private var prodInFlight = false
     @State private var prodError: String?
     @State private var prodPreview: ToolCommandPreview?
+    @State private var externalTerminalInFlight = false
+    @State private var externalTerminalError: String?
 
     var body: some View {
         ZStack {
@@ -1196,6 +1198,23 @@ private struct SessionDetailView: View {
                             .help("Run `tp prod` for this session.")
 
                             Button {
+                                launchExternalTerminal(for: session)
+                            } label: {
+                                if externalTerminalInFlight {
+                                    HStack(spacing: 8) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                        Text("Opening…")
+                                    }
+                                } else {
+                                    Label("Terminal", systemImage: "terminal")
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(externalTerminalInFlight)
+                            .help("Open this tmux session in Ghostty, iTerm2, or Terminal.")
+
+                            Button {
                                 presentRenameSheet(for: session)
                             } label: {
                                 Label("Rename", systemImage: "pencil")
@@ -1258,6 +1277,21 @@ private struct SessionDetailView: View {
 
                             Button("Dismiss") {
                                 self.prodError = nil
+                            }
+                        }
+                    }
+
+                    if let externalTerminalError {
+                        HStack {
+                            Text(externalTerminalError)
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
+                                .foregroundColor(.red.opacity(0.9))
+                                .textSelection(.enabled)
+
+                            Spacer(minLength: 12)
+
+                            Button("Dismiss") {
+                                self.externalTerminalError = nil
                             }
                         }
                     }
@@ -1344,12 +1378,14 @@ private struct SessionDetailView: View {
         } message: { session in
             Text("This will terminate the tmux session named \(session.name).")
         }
-        .onChange(of: session?.id) { _ in
+        .onChange(of: session?.id) { _, _ in
             mergeInFlight = false
             mergeError = nil
             prodInFlight = false
             prodError = nil
             prodPreview = nil
+            externalTerminalInFlight = false
+            externalTerminalError = nil
         }
     }
 
@@ -1441,6 +1477,33 @@ private struct SessionDetailView: View {
                 await MainActor.run {
                     prodInFlight = false
                     prodError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func launchExternalTerminal(for session: SessionInfo) {
+        guard !externalTerminalInFlight else {
+            return
+        }
+
+        externalTerminalError = nil
+        externalTerminalInFlight = true
+
+        Task {
+            do {
+                try await ExternalTerminalLauncher.open(
+                    sessionName: session.name,
+                    workingDirectory: session.resolvedWorkingDirectory
+                )
+
+                await MainActor.run {
+                    externalTerminalInFlight = false
+                }
+            } catch {
+                await MainActor.run {
+                    externalTerminalInFlight = false
+                    externalTerminalError = error.localizedDescription
                 }
             }
         }
