@@ -107,6 +107,11 @@ struct TmuxTerminalView: NSViewRepresentable {
                 do {
                     _ = try CommandRunner.runExpectingSuccess(
                         executable: "/usr/bin/env",
+                        arguments: ["tmux", "set-option", "-t", targetSessionName, "mouse", "on"]
+                    )
+
+                    _ = try CommandRunner.runExpectingSuccess(
+                        executable: "/usr/bin/env",
                         arguments: ["tmux", "switch-client", "-c", activeTTY, "-t", targetSessionName]
                     )
 
@@ -128,8 +133,8 @@ struct TmuxTerminalView: NSViewRepresentable {
             self.activeTTY = nil
             self.launchedSessionName = sessionName
 
-            // Respect the session's existing tmux mouse configuration so native text selection keeps working.
-            let shellCommand = "tty > \(shellQuoted(ttyHandshakeURL.path)); exec tmux attach-session -t \(shellQuoted(sessionName))"
+            // Enable tmux mouse mode before attaching so wheel events can drive copy-mode scrollback.
+            let shellCommand = "tty > \(shellQuoted(ttyHandshakeURL.path)); tmux set-option -t \(shellQuoted(sessionName)) mouse on 2>/dev/null; exec tmux attach-session -t \(shellQuoted(sessionName))"
 
             terminalView.startProcess(
                 executable: "/bin/sh",
