@@ -49,14 +49,20 @@ final class SwiftMuxTerminalView: LocalProcessTerminalView {
         return hadPendingTarget
     }
 
-    func handleScrollWheel(_ event: NSEvent) -> Bool {
+    func handleScrollWheel(
+        _ event: NSEvent,
+        fallbackWhenMouseReportingUnavailable: (Int) -> Void = { _ in }
+    ) -> Bool {
         let terminal = getTerminal()
+        let scrollSteps = scrollSteps(for: event, terminal: terminal)
+
         guard allowMouseReporting, terminal.mouseMode != .off else {
-            resetPreciseScrollState()
-            return false
+            if scrollSteps != 0 {
+                fallbackWhenMouseReportingUnavailable(scrollSteps)
+            }
+            return scrollSteps != 0 || event.hasPreciseScrollingDeltas || !event.momentumPhase.isEmpty
         }
 
-        let scrollSteps = scrollSteps(for: event, terminal: terminal)
         guard scrollSteps != 0 else {
             return event.hasPreciseScrollingDeltas || !event.momentumPhase.isEmpty
         }
@@ -414,8 +420,11 @@ final class SwiftMuxTerminalView: LocalProcessTerminalView {
     }
 
     private func scrollSteps(for event: NSEvent, terminal: Terminal) -> Int {
-        if !event.momentumPhase.isEmpty {
+        if event.phase.contains(.began) || !event.momentumPhase.isEmpty {
             resetPreciseScrollState()
+        }
+
+        if !event.momentumPhase.isEmpty {
             return 0
         }
 

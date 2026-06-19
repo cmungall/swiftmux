@@ -23,7 +23,7 @@ struct TmuxTerminalView: NSViewRepresentable {
         view.nativeBackgroundColor = NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1.0)
         view.nativeForegroundColor = NSColor(calibratedRed: 0.88, green: 0.91, blue: 0.94, alpha: 1.0)
         view.optionAsMetaKey = false
-        view.allowMouseReporting = true
+        view.allowMouseReporting = false
         view.getTerminal().silentLog = true
         context.coordinator.bind(view)
         return view
@@ -267,7 +267,10 @@ struct TmuxTerminalView: NSViewRepresentable {
 
             switch event.type {
             case .scrollWheel:
-                return terminalView.handleScrollWheel(event) ? nil : event
+                let handled = terminalView.handleScrollWheel(event) { [weak self] scrollSteps in
+                    self?.scrollActiveTmuxPaneInCopyMode(steps: scrollSteps)
+                }
+                return handled ? nil : event
             case .leftMouseDown:
                 if terminalView.beginCommandClick(with: event) {
                     suppressMouseUntilUp = true
@@ -277,6 +280,72 @@ struct TmuxTerminalView: NSViewRepresentable {
             default:
                 return event
             }
+        }
+
+        private func scrollActiveTmuxPaneInCopyMode(steps: Int) {
+            let tty = activeTTY
+            let sessionName = launchedSessionName
+            let lineCount = min(max(abs(steps) * 5, 1), 200)
+            let action = steps > 0 ? "scroll-up" : "scroll-down"
+
+            Task.detached(priority: .userInitiated) {
+                guard let pane = Self.resolveActivePane(tty: tty, sessionName: sessionName) else {
+                    return
+                }
+
+                if steps > 0 {
+                    _ = try? CommandRunner.run(
+                        executable: "/usr/bin/env",
+                        arguments: ["tmux", "copy-mode", "-t", pane]
+                    )
+                }
+
+                let output = try? CommandRunner.run(
+                    executable: "/usr/bin/env",
+                    arguments: ["tmux", "send-keys", "-t", pane, "-X", "-N", String(lineCount), action]
+                )
+
+                guard steps < 0, output?.exitCode == 0 else {
+                    return
+                }
+
+                let scrollPosition = try? CommandRunner.run(
+                    executable: "/usr/bin/env",
+                    arguments: ["tmux", "display-message", "-p", "-t", pane, "#{scroll_position}"]
+                )
+                guard scrollPosition?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "0" else {
+                    return
+                }
+
+                _ = try? CommandRunner.run(
+                    executable: "/usr/bin/env",
+                    arguments: ["tmux", "send-keys", "-t", pane, "-X", "cancel"]
+                )
+            }
+        }
+
+        nonisolated private static func resolveActivePane(tty: String?, sessionName: String?) -> String? {
+            if let tty, !tty.isEmpty {
+                let output = try? CommandRunner.run(
+                    executable: "/usr/bin/env",
+                    arguments: ["tmux", "display-message", "-p", "-c", tty, "#{pane_id}"]
+                )
+                let pane = output?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if output?.exitCode == 0, !pane.isEmpty {
+                    return pane
+                }
+            }
+
+            guard let sessionName, !sessionName.isEmpty else {
+                return nil
+            }
+
+            let output = try? CommandRunner.run(
+                executable: "/usr/bin/env",
+                arguments: ["tmux", "display-message", "-p", "-t", sessionName, "#{pane_id}"]
+            )
+            let pane = output?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return output?.exitCode == 0 && !pane.isEmpty ? pane : nil
         }
 
         nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
