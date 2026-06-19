@@ -2,6 +2,7 @@
 .swiftpm/
 SwiftMux.app/
 SwiftMux Dev.app/
+SwiftMux Test.app/
 *.xcodeproj
 xcuserdata/
 DerivedData/
