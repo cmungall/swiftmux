@@ -1,5 +1,57 @@
 import Foundation
 
+private let repositoryMetadataCache = ExpiringCache<RepositoryMetadata>()
+private let githubRepoSlugCache = ExpiringCache<String?>()
+
+private struct RepositoryMetadata: Sendable {
+    let canonicalRepoRoot: String?
+    let inferredRepoName: String?
+}
+
+private struct CachedValue<Value: Sendable>: Sendable {
+    let value: Value
+    let expiresAt: Date
+}
+
+private final class ExpiringCache<Value: Sendable>: @unchecked Sendable {
+    private let ttl: TimeInterval
+    private let lock = NSLock()
+    private var values: [String: CachedValue<Value>] = [:]
+
+    init(ttl: TimeInterval = 300) {
+        self.ttl = ttl
+    }
+
+    func value(for path: String, load: () -> Value) -> Value {
+        let key = normalizedPath(path)
+        let now = Date()
+
+        lock.lock()
+        if let cached = values[key], cached.expiresAt > now {
+            lock.unlock()
+            return cached.value
+        }
+        lock.unlock()
+
+        let value = load()
+
+        lock.lock()
+        values[key] = CachedValue(
+            value: value,
+            expiresAt: now.addingTimeInterval(ttl)
+        )
+        lock.unlock()
+
+        return value
+    }
+}
+
+private func normalizedPath(_ path: String) -> String {
+    URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        .standardizedFileURL
+        .path
+}
+
 struct SessionCreationRequest {
     let repoPath: String
     let profile: SessionCreationProfile
@@ -700,20 +752,37 @@ final class SessionManager: ObservableObject {
         var decoded = try decoder.decode([SessionInfo].self, from: data)
         let activityByName = (try? Self.loadTmuxSessionActivity()) ?? [:]
 
-        // Enrich sessions that lack @repo metadata by resolving git remote
         for i in decoded.indices {
             decoded[i].tmuxActivityAt = activityByName[decoded[i].name]
             let dir = decoded[i].workingDirectory
                 .replacingOccurrences(of: "~", with: NSHomeDirectory())
-            decoded[i].canonicalRepoRoot = Self.resolveCanonicalRepoRoot(at: dir)
-            let repoPath = decoded[i].canonicalRepoRoot ?? dir
-            decoded[i].githubRepoSlug = Self.resolveGitHubRepoSlug(at: repoPath)
+            let metadataRepoPath = Self.absoluteMetadataRepoPath(decoded[i].metadata.repo)
 
-            if decoded[i].metadata.repo == nil || decoded[i].metadata.repo?.isEmpty == true {
-                if let repoRoot = decoded[i].canonicalRepoRoot {
-                    decoded[i].metadata.repo = repoRoot
-                } else if let repoName = Self.resolveGitRepoName(at: dir) {
-                    decoded[i].metadata.repo = repoName
+            if let metadataRepoPath {
+                decoded[i].canonicalRepoRoot = metadataRepoPath
+            } else {
+                let metadata = repositoryMetadataCache.value(for: dir) {
+                    let repoRoot = Self.resolveCanonicalRepoRoot(at: dir)
+                    return RepositoryMetadata(
+                        canonicalRepoRoot: repoRoot,
+                        inferredRepoName: repoRoot == nil ? Self.resolveGitRepoName(at: dir) : nil
+                    )
+                }
+                decoded[i].canonicalRepoRoot = metadata.canonicalRepoRoot
+
+                if decoded[i].metadata.repo == nil || decoded[i].metadata.repo?.isEmpty == true {
+                    if let repoRoot = metadata.canonicalRepoRoot {
+                        decoded[i].metadata.repo = repoRoot
+                    } else if let repoName = metadata.inferredRepoName {
+                        decoded[i].metadata.repo = repoName
+                    }
+                }
+            }
+
+            if decoded[i].metadata.pr?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                let repoPath = decoded[i].canonicalRepoRoot ?? dir
+                decoded[i].githubRepoSlug = githubRepoSlugCache.value(for: repoPath) {
+                    Self.resolveGitHubRepoSlug(at: repoPath)
                 }
             }
         }
@@ -917,6 +986,21 @@ final class SessionManager: ObservableObject {
         let topLevel = topLevelResult?.stdout
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return topLevel.isEmpty ? nil : topLevel
+    }
+
+    nonisolated private static func absoluteMetadataRepoPath(_ repo: String?) -> String? {
+        guard let repo else {
+            return nil
+        }
+
+        let expanded = (repo as NSString)
+            .expandingTildeInPath
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard expanded.hasPrefix("/") else {
+            return nil
+        }
+
+        return normalizedPath(expanded)
     }
 
     nonisolated private static func resolveGitHubRepoSlug(at path: String) -> String? {
