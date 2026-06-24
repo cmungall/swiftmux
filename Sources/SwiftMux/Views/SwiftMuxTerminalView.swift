@@ -2,6 +2,9 @@ import AppKit
 import Foundation
 import SwiftTerm
 
+private let terminalOutputFlushInterval: TimeInterval = 0.08
+private let terminalImmediateFlushByteCount = 64 * 1024
+
 final class SwiftMuxTerminalView: LocalProcessTerminalView {
     var currentWorkingDirectory: String?
     var sessionWorkingDirectory: String?
@@ -9,6 +12,9 @@ final class SwiftMuxTerminalView: LocalProcessTerminalView {
 
     private var pendingOpenTarget: TerminalOpenTarget?
     private var pendingMouseDownLocation: CGPoint?
+    private var pendingOutputBytes: [UInt8] = []
+    private var outputFlushScheduled = false
+    private var lastOutputFlushAt = Date.distantPast
     private var preciseScrollAccumulator: CGFloat = 0
     private var lastPreciseScrollDirection = 0
 
@@ -47,6 +53,21 @@ final class SwiftMuxTerminalView: LocalProcessTerminalView {
         pendingOpenTarget = nil
         pendingMouseDownLocation = nil
         return hadPendingTarget
+    }
+
+    override func dataReceived(slice: ArraySlice<UInt8>) {
+        pendingOutputBytes.append(contentsOf: slice)
+
+        if pendingOutputBytes.count >= terminalImmediateFlushByteCount {
+            flushPendingOutput()
+        } else {
+            flushPendingOutputWhenReady()
+        }
+    }
+
+    override func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+        flushPendingOutput()
+        super.processTerminated(source, exitCode: exitCode)
     }
 
     func handleScrollWheel(
@@ -109,6 +130,44 @@ final class SwiftMuxTerminalView: LocalProcessTerminalView {
         let dx = event.locationInWindow.x - pendingMouseDownLocation.x
         let dy = event.locationInWindow.y - pendingMouseDownLocation.y
         return hypot(dx, dy) <= 4
+    }
+
+    private func flushPendingOutputWhenReady() {
+        let delay = terminalOutputFlushInterval - Date().timeIntervalSince(lastOutputFlushAt)
+        guard delay > 0 else {
+            flushPendingOutput()
+            return
+        }
+
+        schedulePendingOutputFlush(after: delay)
+    }
+
+    private func schedulePendingOutputFlush(after delay: TimeInterval) {
+        guard !outputFlushScheduled else {
+            return
+        }
+
+        outputFlushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + .nanoseconds(Int(delay * 1_000_000_000))) { [weak self] in
+            guard let self else {
+                return
+            }
+
+            self.outputFlushScheduled = false
+            self.flushPendingOutputWhenReady()
+        }
+    }
+
+    private func flushPendingOutput() {
+        outputFlushScheduled = false
+        guard !pendingOutputBytes.isEmpty else {
+            return
+        }
+
+        let bytes = pendingOutputBytes
+        pendingOutputBytes.removeAll(keepingCapacity: true)
+        lastOutputFlushAt = Date()
+        super.dataReceived(slice: bytes[...])
     }
 
     private func openTarget(for event: NSEvent) -> TerminalOpenTarget? {
