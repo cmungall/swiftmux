@@ -1,5 +1,7 @@
 import Foundation
 
+private let sessionRefreshIntervalNanoseconds: UInt64 = 10_000_000_000
+
 struct SessionCreationRequest {
     let repoPath: String
     let profile: SessionCreationProfile
@@ -190,7 +192,7 @@ final class SessionManager: ObservableObject {
             await self.refresh()
 
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(nanoseconds: sessionRefreshIntervalNanoseconds)
                 await self.refresh()
             }
         }
